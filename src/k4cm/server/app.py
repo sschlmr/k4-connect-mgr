@@ -1,0 +1,244 @@
+"""FastAPI application: the REST API members and admins talk to.
+
+All endpoints except /health require a bearer API key. Admin endpoints
+additionally require the caller's is_admin flag.
+"""
+
+from __future__ import annotations
+
+import logging
+from contextlib import asynccontextmanager
+from datetime import timedelta
+from typing import Any
+
+from fastapi import Depends, FastAPI, Request, status
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+
+from .. import __version__
+from ..models import AssignmentState, User, isoformat, utcnow
+from .auth import generate_api_key, hash_api_key, require_admin, require_user
+from .backup import BackupScheduler
+from .config import ServerConfig
+from .db import Database
+from .manager import AssignmentManager, ManagerError
+from .monitor import Monitor
+
+
+class RadioRequest(BaseModel):
+    radio: str = Field(..., description="id or name of the specific K4 being requested")
+
+
+class NewUserRequest(BaseModel):
+    callsign: str
+    is_admin: bool = False
+
+
+class PowerRequest(BaseModel):
+    action: str = Field(..., description="on, off or cycle")
+
+
+def create_app(
+    config: ServerConfig,
+    db: Database | None = None,
+    logger: logging.Logger | None = None,
+    background: bool = True,
+) -> FastAPI:
+    logger = logger or logging.getLogger("k4cm.server")
+    db = db or Database(config.database_path)
+    manager = AssignmentManager(config, db, logger)
+    monitor = Monitor(manager)
+    backups = BackupScheduler(config, db, logger)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        logger.info(
+            "k4cm server %s starting: %d radio(s), %d active session(s)",
+            __version__, len(config.radios), len(db.active_assignments()),
+        )
+        if background:
+            monitor.start()
+            backups.start()
+        try:
+            yield
+        finally:
+            if background:
+                await monitor.stop()
+                await backups.stop()
+            logger.info("k4cm server stopped")
+
+    app = FastAPI(title="K4 Connect Manager", version=__version__, lifespan=lifespan)
+    app.state.config = config
+    app.state.db = db
+    app.state.manager = manager
+    app.state.monitor = monitor
+
+    @app.exception_handler(ManagerError)
+    async def _manager_error(request: Request, exc: ManagerError) -> JSONResponse:
+        return JSONResponse(status_code=exc.status_code, content=exc.payload())
+
+    # -- unauthenticated ---------------------------------------------------
+
+    @app.get("/health")
+    async def health() -> dict[str, Any]:
+        return {"status": "ok", "version": __version__, "time": isoformat(utcnow())}
+
+    # -- member endpoints --------------------------------------------------
+
+    @app.post("/assignments", status_code=status.HTTP_201_CREATED)
+    async def create_assignment(body: RadioRequest, user: User = Depends(require_user)):
+        return await manager.request_assignment(user.callsign, body.radio)
+
+    @app.get("/assignments/current")
+    async def current_assignment(user: User = Depends(require_user)):
+        return manager.session_state(user.callsign)
+
+    @app.post("/assignments/current/ack")
+    async def ack_assignment(user: User = Depends(require_user)):
+        return manager.ack(user.callsign)
+
+    @app.post("/assignments/current/extend")
+    async def extend_assignment(user: User = Depends(require_user)):
+        return await manager.extend(user.callsign)
+
+    @app.delete("/assignments/current")
+    async def release_assignment(user: User = Depends(require_user)):
+        return await manager.release(user.callsign)
+
+    @app.get("/status")
+    async def site_status(user: User = Depends(require_user)):
+        return {"radios": manager.status(), "time": isoformat(utcnow())}
+
+    # -- queue -------------------------------------------------------------
+
+    @app.post("/queue", status_code=status.HTTP_201_CREATED)
+    async def join_queue(body: RadioRequest, user: User = Depends(require_user)):
+        return manager.enqueue(user.callsign, body.radio)
+
+    @app.get("/queue/position")
+    async def queue_position(user: User = Depends(require_user)):
+        return manager.session_state(user.callsign)
+
+    @app.delete("/queue")
+    async def leave_queue(user: User = Depends(require_user)):
+        return manager.leave_queue(user.callsign)
+
+    @app.post("/queue/accept", status_code=status.HTTP_201_CREATED)
+    async def accept_offer(user: User = Depends(require_user)):
+        return await manager.accept_offer(user.callsign)
+
+    @app.post("/queue/decline")
+    async def decline_offer(user: User = Depends(require_user)):
+        return manager.decline_offer(user.callsign)
+
+    # -- admin: users ------------------------------------------------------
+
+    @app.get("/users")
+    async def list_users(admin: User = Depends(require_admin)):
+        return [
+            {"callsign": u.callsign, "is_admin": u.is_admin, "enabled": u.enabled}
+            for u in db.list_users()
+        ]
+
+    @app.post("/users", status_code=status.HTTP_201_CREATED)
+    async def create_user(body: NewUserRequest, admin: User = Depends(require_admin)):
+        callsign = body.callsign.strip().upper()
+        if db.get_user(callsign) is not None:
+            raise ManagerError(409, f"user {callsign} already exists")
+        api_key = generate_api_key()
+        db.create_user(callsign, hash_api_key(api_key), body.is_admin)
+        db.audit(admin.callsign, "user.create", f"{callsign} (admin={body.is_admin})")
+        logger.info("user %s created by %s", callsign, admin.callsign)
+        return {
+            "callsign": callsign,
+            "is_admin": body.is_admin,
+            "api_key": api_key,
+            "note": "This key is shown once. Give it to the user over a trusted channel.",
+        }
+
+    @app.delete("/users/{callsign}")
+    async def delete_user(callsign: str, admin: User = Depends(require_admin)):
+        callsign = callsign.strip().upper()
+        target = db.get_user(callsign)
+        if target is None:
+            raise ManagerError(404, f"no such user: {callsign}")
+        if target.is_admin and db.count_admins() <= 1:
+            raise ManagerError(409, "refusing to delete the last admin account")
+        active = db.live_assignment_for_callsign(callsign)
+        if active is not None and active.state is AssignmentState.PENDING:
+            raise ManagerError(409, f"{callsign} has a session being set up right now; try again shortly")
+        if active is not None:
+            await manager.end_assignment(
+                active, AssignmentState.FORCED, f"user deleted by {admin.callsign}", admin.callsign
+            )
+        db.delete_user(callsign)
+        db.audit(admin.callsign, "user.delete", callsign)
+        return {"deleted": callsign}
+
+    @app.post("/users/{callsign}/reset-key")
+    async def reset_key(callsign: str, admin: User = Depends(require_admin)):
+        callsign = callsign.strip().upper()
+        if db.get_user(callsign) is None:
+            raise ManagerError(404, f"no such user: {callsign}")
+        api_key = generate_api_key()
+        db.set_user_key(callsign, hash_api_key(api_key))
+        db.audit(admin.callsign, "user.reset_key", callsign)
+        return {"callsign": callsign, "api_key": api_key, "note": "This key is shown once."}
+
+    # -- admin: radios -----------------------------------------------------
+
+    @app.get("/radios")
+    async def list_radios(admin: User = Depends(require_admin)):
+        return [
+            {
+                **radio.public(),
+                "cat_host": radio.host,
+                "cat_port": radio.cat_port,
+                "reachable": manager.reachability.get(radio.id),
+                "power_method": radio.power.method.value,
+                "power_address": radio.power.address,
+                "power_outlet": radio.power.outlet,
+            }
+            for radio in config.radios.values()
+        ]
+
+    @app.post("/radios/reload")
+    async def reload_radios(admin: User = Depends(require_admin)):
+        return manager.reload_radios(admin.callsign)
+
+    @app.post("/radios/{radio_id}/power")
+    async def radio_power(radio_id: str, body: PowerRequest, admin: User = Depends(require_admin)):
+        return await manager.power_action(radio_id, body.action, admin.callsign)
+
+    # -- admin: sessions and audit ----------------------------------------
+
+    @app.get("/assignments")
+    async def list_assignments(limit: int = 100, admin: User = Depends(require_admin)):
+        return [
+            manager.assignment_payload(a, include_password=False)
+            for a in db.list_assignments(limit=limit)
+        ]
+
+    @app.delete("/assignments/{assignment_id}")
+    async def force_release(assignment_id: int, admin: User = Depends(require_admin)):
+        return await manager.force_release(assignment_id, admin.callsign)
+
+    @app.get("/audit")
+    async def read_audit(
+        hours: float | None = None,
+        actor: str | None = None,
+        limit: int = 200,
+        admin: User = Depends(require_admin),
+    ):
+        since = utcnow() - timedelta(hours=hours) if hours else None
+        return [
+            {
+                "timestamp": isoformat(e.timestamp),
+                "actor": e.actor,
+                "action": e.action,
+                "detail": e.detail,
+            }
+            for e in db.list_audit(since=since, actor=actor, limit=limit)
+        ]
+
+    return app

@@ -1,0 +1,35 @@
+# Hardware test configuration. Copy to tests/hardware/hardware.toml (gitignored)
+# and fill in what you have; tests needing an absent section are skipped.
+#
+#   .venv/bin/python -m pytest tests/hardware -v -s
+#
+# Results, including raw radio responses, are written to
+# tests/hardware/observations.json (also gitignored).
+
+# Your own K4/0 (or K4) — the panel the client drives. Its CAT port must be
+# reachable from the machine running the tests (normally your home LAN).
+[panel]
+cat_host = "192.168.1.50"
+cat_port = 9200
+
+# A remote K4 the panel can connect to, with a password that currently works.
+# Used for the connect / disconnect / wrong-password tests. Nothing here is
+# changed on that radio.
+[remote]
+host = "mh01.net"          # exactly what RRT will be given; a name tests name support
+port = 9204
+password = "..."
+
+# The central K4's CAT port. Only reachable from the site LAN or over a VPN.
+# Without allow_changes the tests only read from it.
+#
+# allow_changes = true lets the tests set its remote password and allowed
+# connection count (RRP / RRC) — this WILL disconnect anyone using it. The
+# original values are read first and restored afterwards when the radio
+# reports them.
+[site]
+cat_host = "10.0.0.11"
+cat_port = 9200
+public_host = "mh01.net"   # what the panel dials to reach this radio
+public_port = 9204
+allow_changes = false

@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Build artifacts
+build/
+dist/
+packaging/out/
+
+# Local data (never commit keys, certificates or the database)
+*.db
+*.pem
+server.toml
+config.toml
+
+# Hardware test credentials and results
+tests/hardware/hardware.toml
+tests/hardware/observations.json
+
+# OS clutter
+.DS_Store

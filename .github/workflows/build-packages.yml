@@ -1,0 +1,94 @@
+name: Build packages
+
+# Builds every installer on its own OS — PyInstaller cannot cross-compile.
+# Runners are clean machines with no antivirus holding freshly written binaries,
+# which is also why release builds belong here rather than on a workstation.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m pytest -q
+
+  windows-server:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m PyInstaller --clean --noconfirm packaging\windows-server\k4cm-server.spec
+      - name: Build the installer
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" packaging\windows-server\installer.iss
+      - uses: actions/upload-artifact@v4
+        with:
+          name: k4cm-server-setup
+          path: packaging/out/k4cm-server-setup.exe
+
+  windows-client:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m PyInstaller --clean --noconfirm packaging\windows-client\k4cm.spec
+      - name: Build the installer
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" packaging\windows-client\installer.iss
+      - uses: actions/upload-artifact@v4
+        with:
+          name: k4cm-client-setup
+          path: packaging/out/k4cm-client-setup.exe
+
+  macos-client:
+    needs: test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev]"
+      - run: bash packaging/macos-client/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: k4cm-client-macos-pkg
+          path: packaging/out/*.pkg
+
+  linux-client:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev]"
+      - run: bash packaging/linux-client/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: k4cm-client-linux
+          path: |
+            packaging/out/*.tar.gz
+            packaging/out/*.deb
