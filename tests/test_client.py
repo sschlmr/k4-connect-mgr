@@ -153,6 +153,29 @@ async def test_connect_reports_a_refused_password(server):
         )
 
 
+async def test_connect_fails_when_a_refusal_is_silent(server, monkeypatch):
+    # A real K4/0 given a wrong password sends no RRT!; it just never connects.
+    # That must still be a failure, so `request` hands the radio back.
+    server.radio_a.password = "the-real-one"
+    server.radio_a.rrc = 1
+    server.local_radio.silent_refusal = True
+    monkeypatch.setattr(local_radio, "CONNECT_TIMEOUT", 1.5)
+    config = ClientConfig(
+        server_url="https://mh01.net",
+        callsign="W1AW",
+        api_key="k",
+        radio_host="127.0.0.1",
+        radio_cat_port=server.local_radio.cat_port,
+    )
+
+    import asyncio
+
+    with pytest.raises(local_radio.RadioError, match="did not connect"):
+        await asyncio.to_thread(
+            local_radio.connect, config, "127.0.0.1", server.radio_a.remote_port, "wrong-password"
+        )
+
+
 async def test_disconnect_sends_rrn(server):
     server.radio_a.password = "pw"
     server.radio_a.rrc = 1

@@ -126,10 +126,10 @@ async def test_wrong_password_is_refused(panel, remote, observed):
         await make_idle(panel)
 
     assert final != -1, "SECURITY: the panel connected with a wrong password"
-    assert any(r.startswith("RRT!") for r in responses), (
-        f"the client detects refusal by an RRT! response, but the radio sent {responses}; "
-        "update k4cm.client.radio to match"
-    )
+    # The client treats both an RRT! reply and silence as refusal (a K4/0 was
+    # observed to send nothing), so either is fine; anything else is new.
+    unexpected = [r for r in responses if not r.startswith("RRT!")]
+    assert not unexpected, f"unexpected responses to a refused RRT: {unexpected}"
 
 
 # -- site: the central K4 --------------------------------------------------

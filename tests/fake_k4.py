@@ -7,6 +7,8 @@ Simulates the CAT commands the connection manager uses:
   RRC<n>;               set allowed remote connections; RRC0; drops clients
   RRT<host>:<port>?<pw>;  connect as a client to another (fake) K4's remote
                           port; replies RRT!; on failure, nothing on success
+                          (with silent_refusal set, nothing on failure either —
+                          what a real K4/0 was observed to do)
   RRN;                  drop the outgoing remote connection
   CC;                   -> CC<n>; n = attached remote clients (server role),
                            -1 when connected as a client, else 0
@@ -34,6 +36,7 @@ class FakeK4:
         self.password = ""
         self.rrc = 0
         self.powered_on = True               # PS0; turns this off, like a real K4
+        self.silent_refusal = False          # True: a refused RRT gets no RRT! reply
         self.commands: list[str] = []        # every CAT command received, for assertions
         self._remote_clients: dict[asyncio.StreamWriter, str] = {}
         self._outgoing: asyncio.StreamWriter | None = None
@@ -151,13 +154,16 @@ class FakeK4:
             verdict = await asyncio.wait_for(reader.readline(), 5)
             if verdict.strip() != b"OK":
                 writer.close()
-                return "RRT!;"
+                return self._refusal()
             await self._drop_outgoing()
             self._outgoing = writer
             asyncio.ensure_future(self._watch_outgoing(reader))
             return ""
         except (TimeoutError, OSError, ValueError):
-            return "RRT!;"
+            return self._refusal()
+
+    def _refusal(self) -> str:
+        return "" if self.silent_refusal else "RRT!;"
 
     async def _watch_outgoing(self, reader: asyncio.StreamReader) -> None:
         try:

@@ -241,8 +241,8 @@ which is what makes side-by-side testing possible.
 ### Testing against real radios
 
 `tests/hardware/` checks the simulator's assumptions against real hardware:
-that a panel reads `CC-1` when connected, that a wrong password is refused with
-`RRT!`, that `RRC0;` drops an attached panel, and that an ended session's
+that a panel reads `CC-1` when connected, that a wrong password is refused (a
+K4/0 does this silently, with no `RRT!`), that `RRC0;` drops an attached panel, and that an ended session's
 password no longer connects. It is skipped unless you create
 `tests/hardware/hardware.toml` (copy `hardware.example.toml`; the file is
 gitignored). Tests that change the central radio's password need
@@ -263,7 +263,7 @@ Owner's Manual:
 |---|---|---|
 | `RRP<password>;` | central K4 | Set the remote-access password |
 | `RRC<n>;` | central K4 | Allow n remote connections (0 disables and disconnects) |
-| `RRT<host>:<port>?<password>;` | local K4/K4-0 | Connect to a remote K4; failure answers `RRT!;` |
+| `RRT<host>:<port>?<password>;` | local K4/K4-0 | Connect to a remote K4; success is silent, and failure may answer `RRT!;` or nothing at all |
 | `RRN;` | local K4/K4-0 | Disconnect |
 | `CC;` | either | Client count: n ≥ 1 clients attached (server), -1 connected as a client, 0 idle |
 | `PING;` → `PONG;` | either | Reachability |

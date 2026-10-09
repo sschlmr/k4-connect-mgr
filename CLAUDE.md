@@ -116,8 +116,10 @@ refuses plain `http://` to anything but localhost.
 
 `radio.py` drives the user's own K4/K4-0: `RRT<host>:<port>?<password>;` to connect,
 `RRN;` to disconnect. A successful connect is *silent* on the K4, so success is confirmed
-by polling `CC;`; failure arrives asynchronously as `RRT!;`, which is why
-`CatClient.request` takes an `error_prefix`.
+by polling `CC;`. Failure *may* arrive asynchronously as `RRT!;` (hence
+`CatClient.request`'s `error_prefix`), but a real K4/0 refuses a wrong password silently,
+so a link not confirmed by `CONNECT_TIMEOUT` is also a failure. The fake's
+`silent_refusal` flag models that.
 
 ### CAT layer (`src/k4cm/cat.py`)
 
