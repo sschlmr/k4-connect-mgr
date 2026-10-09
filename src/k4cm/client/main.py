@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import sys
 import time
+from collections.abc import Callable
 from typing import Any
 
 import typer
@@ -201,6 +202,7 @@ def request(
                 assignment["radio"]["connect_host"],
                 assignment["radio"]["connect_port"],
                 assignment["password"],
+                _server_sees_panel(api),
             )
             ok(f"Local radio: {detail}")
         except local_radio.RadioError as e:
@@ -216,6 +218,19 @@ def request(
 
     if not no_watch:
         _watch_loop(api, cfg)
+
+
+def _server_sees_panel(api: ServerApi) -> Callable[[], bool]:
+    """Confirmation for local_radio.connect: does the central radio report a
+    client attached? The panel's own CC is no evidence (see client/radio.py)."""
+
+    def attached() -> bool:
+        try:
+            return bool(api.link_state().get("attached"))
+        except ApiError:
+            return False
+
+    return attached
 
 
 def _offer_queue(api: ServerApi, radio: str, auto_queue: bool) -> None:
@@ -470,6 +485,7 @@ def _handle_offer(api: ServerApi, cfg: ClientConfig, offer: dict[str, Any]) -> b
                 assignment["radio"]["connect_host"],
                 assignment["radio"]["connect_port"],
                 assignment["password"],
+                _server_sees_panel(api),
             )
             ok(f"Local radio: {detail}")
         except local_radio.RadioError as e:

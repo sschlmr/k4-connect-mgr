@@ -13,6 +13,7 @@
 #define ServerExe "k4cm-server.exe"
 #define TaskServer "K4CM Server"
 #define TaskWatchdog "K4CM Server Watchdog"
+#define FirewallRule "K4 Connect Manager server"
 
 [Setup]
 AppId={{7C2F4E1A-9B3D-4A62-8E51-0F6D2C4A9B10}
@@ -47,6 +48,14 @@ Name: "{group}\Initialise K4CM Server"; Filename: "{app}\{#ServerExe}"; Paramete
 Name: "{group}\Server data folder"; Filename: "{commonappdata}\k4cm"
 
 [Run]
+; Let members reach the API and the radio relay ports. The rule is scoped to the
+; server program, not to ports, so relay ports added later need no new rule.
+; Deleted first so a reinstall does not stack duplicates.
+Filename: "netsh.exe"; Parameters: "advfirewall firewall delete rule name=""{#FirewallRule}"""; \
+  Flags: runhidden; StatusMsg: "Configuring Windows Firewall..."
+Filename: "netsh.exe"; \
+  Parameters: "advfirewall firewall add rule name=""{#FirewallRule}"" dir=in action=allow program=""{app}\{#ServerExe}"" enable=yes profile=any"; \
+  Flags: runhidden; StatusMsg: "Configuring Windows Firewall..."
 ; Register the keep-alive tasks: launch at boot, plus a watchdog every 5 minutes.
 Filename: "schtasks.exe"; \
   Parameters: "/Create /TN ""{#TaskServer}"" /TR ""\""{app}\{#ServerExe}\"" run"" /SC ONSTART /RU SYSTEM /RL HIGHEST /F"; \
@@ -64,6 +73,7 @@ Filename: "{app}\{#ServerExe}"; Parameters: "init"; Description: "Run first-time
 Filename: "schtasks.exe"; Parameters: "/Delete /TN ""{#TaskWatchdog}"" /F"; Flags: runhidden; RunOnceId: "DelWatchdog"
 Filename: "schtasks.exe"; Parameters: "/Delete /TN ""{#TaskServer}"" /F"; Flags: runhidden; RunOnceId: "DelServerTask"
 Filename: "taskkill.exe"; Parameters: "/IM {#ServerExe} /F"; Flags: runhidden; RunOnceId: "StopServer"
+Filename: "netsh.exe"; Parameters: "advfirewall firewall delete rule name=""{#FirewallRule}"""; Flags: runhidden; RunOnceId: "DelFirewall"
 
 [Code]
 { ---- Prerequisites -------------------------------------------------------

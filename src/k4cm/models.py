@@ -100,7 +100,13 @@ class Radio:
     on the site LAN — never handed to members, since CAT has no authentication.
     `public_host`/`public_port` is where a member's panel connects from home
     (usually the site's public address and a forwarded port); `remote_port` is
-    the radio's own remote-link port on the LAN, and the default public port.
+    the radio's own remote-link port on the LAN.
+
+    With `relay_port` set, the server relays the remote link (see
+    server/relay.py): members' panels reach the server on `relay_port`, which
+    becomes the default public port, and the server connects onward to
+    `host`/`remote_port`. Without it, the public port defaults to `remote_port`
+    and members connect to the radio directly.
     """
 
     id: str
@@ -110,6 +116,7 @@ class Radio:
     cat_port: int = DEFAULT_CAT_PORT
     remote_port: int = DEFAULT_REMOTE_PORT
     public_port: int | None = None
+    relay_port: int | None = None
     enabled: bool = True
     description: str = ""
     url: str = ""                          # optional web/reference URL for the radio
@@ -130,6 +137,7 @@ class Radio:
             raise ValueError(f"{where} is missing required field(s): {', '.join(missing)}{hint}")
         radio_id = str(data["id"])
         remote_port = int(data.get("remote_port", DEFAULT_REMOTE_PORT))
+        relay_port = int(data["relay_port"]) if data.get("relay_port") else None
         return cls(
             id=radio_id,
             name=str(data.get("name", radio_id)),
@@ -137,7 +145,8 @@ class Radio:
             public_host=str(data["public_host"]),
             cat_port=int(data.get("cat_port", DEFAULT_CAT_PORT)),
             remote_port=remote_port,
-            public_port=int(data.get("public_port", remote_port)),
+            public_port=int(data.get("public_port", relay_port or remote_port)),
+            relay_port=relay_port,
             enabled=bool(data.get("enabled", True)),
             description=str(data.get("description", "")),
             url=str(data.get("url", "")),
@@ -184,6 +193,7 @@ class Assignment:
     acked: bool = False
     ended_at: datetime | None = None
     end_reason: str = ""
+    client_addr: str | None = None         # where the member last reached the API from
 
     def is_expiring(self, warn_period: timedelta, now: datetime | None = None) -> bool:
         now = now or utcnow()

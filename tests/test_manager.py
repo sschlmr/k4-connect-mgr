@@ -222,13 +222,16 @@ async def test_release_scrambles_password_and_locks_out(server):
     assert server.db.list_assignments()[0].state is AssignmentState.RELEASED
 
 
-async def test_release_disconnects_an_attached_panel(server):
+async def test_lockout_alone_leaves_an_attached_panel_connected(server):
+    # The reason relay_port exists (see test_relay.py): on an unrelayed radio
+    # the lockout stops new connections, but a real K4 keeps the client it has.
     result = await server.manager.request_assignment("W1AW", "k4a")
     await connect_local_panel(server, server.radio_a, result["password"])
     assert server.radio_a.client_count == 1
 
     await server.manager.release("W1AW")
-    assert server.radio_a.client_count == 0
+    assert server.radio_a.rrc == 0
+    assert server.radio_a.client_count == 1
 
 
 async def test_release_without_assignment_is_an_error(server):
@@ -453,7 +456,7 @@ async def test_reload_radios_picks_up_config_edits(server):
         encoding="utf-8",
     )
 
-    result = server.manager.reload_radios("ADMIN")
+    result = await server.manager.reload_radios("ADMIN")
 
     assert result["radios"] == 4
     assert server.config.find_radio("k4c") is not None

@@ -32,8 +32,9 @@ never opens a session.
    (`RRT<host>:<port>?<password>;`) and confirms the link came up.
 4. The client keeps watching the session. Before the deadline it warns you and
    asks whether to accept the end time, extend, or release now.
-5. On release the server scrambles the radio's password again and offers it to
-   whoever is next in that radio's queue.
+5. When the session ends (release, expiry, reclaim or force-release), the server
+   cuts the member's relayed link, scrambles the radio's password again, and
+   offers the radio to whoever is next in that radio's queue.
 
 Each K4 is requested by name — there is no pool of interchangeable radios — so
 each has its own wait queue.
@@ -77,8 +78,9 @@ name = "K4 #1"
 host = "10.0.0.11"           # LAN address the server uses for CAT
 cat_port = 9200
 remote_port = 9204            # the radio's own remote-link port
+relay_port = 9204             # port on THIS server that relays to remote_port
 public_host = "mh01.net"      # where members' panels connect from home
-public_port = 9204            # forwarded to remote_port; defaults to it
+public_port = 9204            # the router's forwarded port; defaults to relay_port
 enabled = true
 description = "Main station K4, tri-bander"
 url = "https://mh01.net/radios/k4a"
@@ -98,10 +100,25 @@ capabilities = ["hf", "6m"]
 
 Then `k4cm admin radios --reload` picks them up without a restart.
 
-Members are only ever given `public_host`/`public_port`. Forward each radio's
-public port to its `remote_port`, and **never forward a CAT port**: CAT has no
-authentication, so anyone who can reach it can set the radio's password. If
-members reach the site over a VPN instead, set `public_host` to the LAN address.
+Members are only ever given `public_host`/`public_port`. On the site router:
+
+- Forward the server's API port (8443) to the server PC.
+- Forward each radio's public port to **the server PC's `relay_port`, not to the
+  radio.** The server passes the link on to the radio and cuts it when the
+  session ends. A K4 doesn't disconnect an attached panel by itself when its
+  password changes, so the relay is what makes the end of a session stick. It
+  also admits only the assigned member's address (`[relay] check_address`).
+- **Never forward a CAT port.** CAT has no authentication: anyone who can
+  reach it can read the radio's current password with `RRP;`, set a new one,
+  or power the radio off.
+
+If members reach the site over a VPN instead, set `public_host` to the server
+PC's LAN address. The installer adds a Windows Firewall rule for the server
+program, which covers the API and every relay port.
+
+A radio without `relay_port` is connected to directly, as in 0.1.0. That still
+works, but ending a session then only stops *new* connections; a member who is
+connected stays on until they disconnect.
 
 ### Client (Windows, macOS, Linux)
 
@@ -195,12 +212,18 @@ are never left tied up. Separately, `[monitor] disconnect_grace_minutes`
 - All client/server traffic is HTTPS. The client refuses `http://` for anything
   but localhost, so API keys and radio passwords never cross the network in the
   clear.
-- **A session's end does not disconnect a member who is still connected.** A
-  K4 keeps an attached panel after its password is changed and `RRC0;` is sent;
-  those only stop *new* connections. The client disconnects your panel when the
-  session it is watching ends, but a member who connected by hand, or isn't
-  running the watcher, stays on until they disconnect. Server-side enforcement
-  is planned.
+- **Ending a session is enforced by the relay.** A K4 keeps an attached panel
+  after its password is changed and `RRC0;` is sent; those only stop *new*
+  connections, and there is no command to disconnect a client. So for radios
+  with `relay_port` set, the server carries the link and cuts it when a session
+  ends, and the K4 drops the client within seconds (about 2 s on hardware).
+  The client also disconnects your panel itself when the session it is
+  watching ends.
+- The relay admits a panel only during an active session, and only from the
+  address the member's client last used to reach the server. That address is
+  refreshed on every poll, so a home address that changes mid-session is
+  picked up within the watcher's polling interval. The radio's own password is
+  still required behind the relay.
 - Trust is a pinned self-signed certificate, confirmed by fingerprint at setup.
   If the certificate changes, every call fails loudly until the user re-runs
   `k4cm config` — rotate deliberately and tell your users.
@@ -248,7 +271,8 @@ which is what makes side-by-side testing possible.
 
 `tests/hardware/` checks the simulator's assumptions against real hardware:
 that a panel reads `CC-1` when connected, that a wrong password is refused (a
-K4/0 does this silently, with no `RRT!`), that `RRC0;` drops an attached panel, and that an ended session's
+K4/0 does this silently, with no `RRT!`), whether `RRC0;` drops an attached
+panel (it doesn't, which is why the server relays), and that an ended session's
 password no longer connects. It is skipped unless you create
 `tests/hardware/hardware.toml` (copy `hardware.example.toml`; the file is
 gitignored). Tests that change the central radio's password need
@@ -268,7 +292,7 @@ Owner's Manual:
 | Command | Sent to | Purpose |
 |---|---|---|
 | `RRP<password>;` | central K4 | Set the remote-access password |
-| `RRC<n>;` | central K4 | Allow n remote connections (0 disables and disconnects) |
+| `RRC<n>;` | central K4 | Allow n remote connections (0 refuses new ones; attached clients stay) |
 | `RRT<host>:<port>?<password>;` | local K4/K4-0 | Connect to a remote K4; success is silent, and failure may answer `RRT!;` or nothing at all |
 | `RRN;` | local K4/K4-0 | Disconnect |
 | `CC;` | either | Client count: n ≥ 1 clients attached (server), -1 connected as a client, 0 idle |

@@ -2,6 +2,9 @@
 
 All endpoints except /health require a bearer API key. Admin endpoints
 additionally require the caller's is_admin flag.
+
+Member endpoints pass the caller's address to the manager: the relay admits a
+panel only from the address its member last reached the API from.
 """
 
 from __future__ import annotations
@@ -17,7 +20,13 @@ from pydantic import BaseModel, Field
 
 from .. import __version__
 from ..models import AssignmentState, User, isoformat, utcnow
-from .auth import generate_api_key, hash_api_key, require_admin, require_user
+from .auth import (
+    client_address,
+    generate_api_key,
+    hash_api_key,
+    require_admin,
+    require_user,
+)
 from .backup import BackupScheduler
 from .config import ServerConfig
 from .db import Database
@@ -56,6 +65,9 @@ def create_app(
             "k4cm server %s starting: %d radio(s), %d active session(s)",
             __version__, len(config.radios), len(db.active_assignments()),
         )
+        # The relay is not a background loop: without it, relayed radios are
+        # unreachable, so it runs whether or not `background` is set.
+        await manager.relay.sync()
         if background:
             monitor.start()
             backups.start()
@@ -65,6 +77,7 @@ def create_app(
             if background:
                 await monitor.stop()
                 await backups.stop()
+            await manager.relay.stop()
             logger.info("k4cm server stopped")
 
     app = FastAPI(title="K4 Connect Manager", version=__version__, lifespan=lifespan)
@@ -86,19 +99,27 @@ def create_app(
     # -- member endpoints --------------------------------------------------
 
     @app.post("/assignments", status_code=status.HTTP_201_CREATED)
-    async def create_assignment(body: RadioRequest, user: User = Depends(require_user)):
-        return await manager.request_assignment(user.callsign, body.radio)
+    async def create_assignment(body: RadioRequest, request: Request, user: User = Depends(require_user)):
+        return await manager.request_assignment(user.callsign, body.radio, client_address(request))
 
     @app.get("/assignments/current")
-    async def current_assignment(user: User = Depends(require_user)):
+    async def current_assignment(request: Request, user: User = Depends(require_user)):
+        manager.note_client_addr(user.callsign, client_address(request))
         return manager.session_state(user.callsign)
 
+    @app.get("/assignments/current/link")
+    async def assignment_link(request: Request, user: User = Depends(require_user)):
+        manager.note_client_addr(user.callsign, client_address(request))
+        return await manager.link_state(user.callsign)
+
     @app.post("/assignments/current/ack")
-    async def ack_assignment(user: User = Depends(require_user)):
+    async def ack_assignment(request: Request, user: User = Depends(require_user)):
+        manager.note_client_addr(user.callsign, client_address(request))
         return manager.ack(user.callsign)
 
     @app.post("/assignments/current/extend")
-    async def extend_assignment(user: User = Depends(require_user)):
+    async def extend_assignment(request: Request, user: User = Depends(require_user)):
+        manager.note_client_addr(user.callsign, client_address(request))
         return await manager.extend(user.callsign)
 
     @app.delete("/assignments/current")
@@ -124,8 +145,8 @@ def create_app(
         return manager.leave_queue(user.callsign)
 
     @app.post("/queue/accept", status_code=status.HTTP_201_CREATED)
-    async def accept_offer(user: User = Depends(require_user)):
-        return await manager.accept_offer(user.callsign)
+    async def accept_offer(request: Request, user: User = Depends(require_user)):
+        return await manager.accept_offer(user.callsign, client_address(request))
 
     @app.post("/queue/decline")
     async def decline_offer(user: User = Depends(require_user)):
@@ -195,6 +216,8 @@ def create_app(
                 "cat_host": radio.host,
                 "cat_port": radio.cat_port,
                 "reachable": manager.reachability.get(radio.id),
+                "relay_port": radio.relay_port,
+                "relay_links": manager.relay.link_count(radio.id),
                 "power_method": radio.power.method.value,
                 "power_address": radio.power.address,
                 "power_outlet": radio.power.outlet,
@@ -204,7 +227,7 @@ def create_app(
 
     @app.post("/radios/reload")
     async def reload_radios(admin: User = Depends(require_admin)):
-        return manager.reload_radios(admin.callsign)
+        return await manager.reload_radios(admin.callsign)
 
     @app.post("/radios/{radio_id}/power")
     async def radio_power(radio_id: str, body: PowerRequest, admin: User = Depends(require_admin)):

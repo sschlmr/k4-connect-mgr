@@ -4,14 +4,17 @@ Simulates the CAT commands the connection manager uses:
 
   PING;                 -> PONG;
   RRP<text>;            set remote-access password (GET: RRP; -> RRP<text>;)
-  RRC<n>;               set allowed remote connections; RRC0; drops clients
+  RRC<n>;               set allowed remote connections; like a real K4, this
+                          gates new connections only — attached clients stay
   RRT<host>:<port>?<pw>;  connect as a client to another (fake) K4's remote
                           port; replies RRT!; on failure, nothing on success
                           (with silent_refusal set, nothing on failure either —
                           what a real K4/0 was observed to do)
   RRN;                  drop the outgoing remote connection
   CC;                   -> CC<n>; n = attached remote clients (server role),
-                           -1 when connected as a client, else 0
+                           -1 when connected as a client, else 0. With
+                           refused_cc_window > 0, also -1 for that many seconds
+                           after a refused RRT, as a real K4/0 reports
 
 The "remote link" between two fakes is a plain TCP connection to the server
 fake's remote port carrying the password on the first line; the server
@@ -37,6 +40,8 @@ class FakeK4:
         self.rrc = 0
         self.powered_on = True               # PS0; turns this off, like a real K4
         self.silent_refusal = False          # True: a refused RRT gets no RRT! reply
+        self.refused_cc_window = 0.0         # seconds of misleading CC-1 after a refusal
+        self._attempt_until = 0.0
         self.commands: list[str] = []        # every CAT command received, for assertions
         self._remote_clients: dict[asyncio.StreamWriter, str] = {}
         self._outgoing: asyncio.StreamWriter | None = None
@@ -119,7 +124,8 @@ class FakeK4:
         if command == "CC":
             if self._remote_clients:
                 return f"CC{len(self._remote_clients)};"
-            return "CC-1;" if self._outgoing else "CC0;"
+            attempting = asyncio.get_running_loop().time() < self._attempt_until
+            return "CC-1;" if self._outgoing or attempting else "CC0;"
         if command == "RRP":
             return f"RRP{self.password};"
         if command.startswith("RRP"):
@@ -128,12 +134,9 @@ class FakeK4:
         if command == "RRC":
             return f"RRC{self.rrc};"
         if command.startswith("RRC"):
+            # Attached clients are deliberately left alone: a real K4 keeps them
+            # after RRC0; (hardware-verified), which is why the server relays.
             self.rrc = int(command[3:])
-            if self.rrc == 0:
-                # dropping allowed connections kicks attached clients
-                for writer in list(self._remote_clients):
-                    writer.close()
-                self._remote_clients.clear()
             return ""
         if command == "RRN":
             await self._drop_outgoing()
@@ -163,6 +166,7 @@ class FakeK4:
             return self._refusal()
 
     def _refusal(self) -> str:
+        self._attempt_until = asyncio.get_running_loop().time() + self.refused_cc_window
         return "" if self.silent_refusal else "RRT!;"
 
     async def _watch_outgoing(self, reader: asyncio.StreamReader) -> None:

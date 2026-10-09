@@ -5,6 +5,11 @@ ending — release, reclaim, expiry, force-release — sets another fresh one an
 drops the allowed-connection count, so a stale password never grants access.
 Passwords are never derived from a previous value.
 
+That lockout only stops *new* connections: a real K4 keeps a client that is
+already attached. For a relayed radio, ending a session therefore also cuts the
+member's link through the server's relay (see relay.py), which the K4 then
+drops within seconds.
+
 Allocation is two-phase so it is race-free. A request first *claims* the radio
 in the database (an atomic PENDING insert — see db.py), and only then talks to
 the radio. All CAT traffic that changes a radio's password runs under that
@@ -35,6 +40,7 @@ from . import power as power_control
 from .auth import AuthThrottle
 from .config import ServerConfig
 from .db import ClaimConflict, Database
+from .relay import RelayManager, normalize_addr
 
 PASSWORD_BYTES = 12
 
@@ -67,6 +73,7 @@ class AssignmentManager:
         self.reachability: dict[str, bool | None] = {}
         self.disconnected_since: dict[str, datetime] = {}
         self._radio_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self.relay = RelayManager(config, db, self.logger)
 
     # -- radio helpers -----------------------------------------------------
 
@@ -120,7 +127,9 @@ class AssignmentManager:
 
     # -- assignment --------------------------------------------------------
 
-    async def request_assignment(self, callsign: str, radio_ref: str) -> dict[str, Any]:
+    async def request_assignment(
+        self, callsign: str, radio_ref: str, client_addr: str | None = None
+    ) -> dict[str, Any]:
         radio = self.radio_or_error(radio_ref)
 
         existing = self.db.live_assignment_for_callsign(callsign)
@@ -152,7 +161,7 @@ class AssignmentManager:
         password = new_password()
         expires_at = utcnow() + self.config.session.max_session
         try:
-            claim = self.db.claim_radio(radio.id, callsign, password, expires_at)
+            claim = self.db.claim_radio(radio.id, callsign, password, expires_at, normalize_addr(client_addr))
         except ClaimConflict as e:
             winner = self.db.live_assignment_for_radio(radio.id)
             if winner is not None and winner.callsign != callsign:
@@ -234,6 +243,8 @@ class AssignmentManager:
             if not self.db.finish_assignment(current.id, state, reason):
                 return False
             self.disconnected_since.pop(current.radio_id, None)
+            # Sever a relayed link now: the lockout below cannot drop it.
+            self.relay.cut(current.radio_id)
             # Offer the radio before any await, so nobody outside the queue can
             # claim it first. A claim made now waits on this lock for its CAT.
             self.promote_queue(current.radio_id)
@@ -271,6 +282,41 @@ class AssignmentManager:
                     await self._lock_radio(radio)
             self.db.audit("system", "assign.abandoned", f"{claim.radio_id} ({claim.callsign})")
             self.logger.warning("abandoned stale claim %s on %s for %s", claim.id, claim.radio_id, claim.callsign)
+
+    async def link_state(self, callsign: str) -> dict[str, Any]:
+        """Whether the caller's assigned radio reports a client attached.
+
+        This is how a member's client confirms its panel connected: a K4/0
+        reports CC-1 while a connect is still failing, but the central radio's
+        own count only rises when a client is really there.
+        """
+        assignment = self._active_or_error(callsign)
+        radio = self.radio_or_error(assignment.radio_id)
+        try:
+            count = await cat.client_count(radio.host, radio.cat_port, self.cat_timeout)
+        except cat.CatError as e:
+            self.reachability[radio.id] = False
+            raise ManagerError(503, f"{radio.name} is not answering: {e}", radio_id=radio.id) from e
+        self.reachability[radio.id] = True
+        return {
+            "radio_id": radio.id,
+            "attached": count >= 1,
+            "clients": max(count, 0),
+            "relayed_links": self.relay.link_count(radio.id) if radio.relay_port else None,
+        }
+
+    def note_client_addr(self, callsign: str, client_addr: str | None) -> None:
+        """Follow a member's address while their session lasts, so the relay
+        admits their panel even if their public address changes mid-session.
+        Called on each authenticated request the session watcher makes."""
+        addr = normalize_addr(client_addr)
+        if addr is None:
+            return
+        assignment = self.db.live_assignment_for_callsign(callsign)
+        if assignment is None or not self.db.set_client_addr(assignment.id, addr):
+            return
+        if assignment.client_addr is not None:  # a change, not the first sighting
+            self.db.audit(callsign, "session.address", f"{assignment.radio_id}: now {addr}")
 
     def ack(self, callsign: str) -> dict[str, Any]:
         assignment = self._active_or_error(callsign)
@@ -360,11 +406,11 @@ class AssignmentManager:
             self.logger.info("offer of %s to %s lapsed", offer.radio_id, offer.callsign)
             self.promote_queue(offer.radio_id)
 
-    async def accept_offer(self, callsign: str) -> dict[str, Any]:
+    async def accept_offer(self, callsign: str, client_addr: str | None = None) -> dict[str, Any]:
         entry = self.db.queue_entry_for_callsign(callsign)
         if entry is None or entry.offered_at is None:
             raise ManagerError(404, "you have no radio being held for you")
-        return await self.request_assignment(callsign, entry.radio_id)
+        return await self.request_assignment(callsign, entry.radio_id, client_addr)
 
     def decline_offer(self, callsign: str) -> dict[str, Any]:
         entry = self.db.queue_entry_for_callsign(callsign)
@@ -488,11 +534,12 @@ class AssignmentManager:
             raise ManagerError(409, f"assignment {assignment_id} is not active ({current.state.value})")
         return {"forced": assignment.radio_id, "callsign": assignment.callsign}
 
-    def reload_radios(self, actor: str) -> dict[str, Any]:
+    async def reload_radios(self, actor: str) -> dict[str, Any]:
         try:
             count = self.config.reload_radios()
         except (OSError, ValueError) as e:
             raise ManagerError(400, f"could not reload radio inventory: {e}") from e
+        await self.relay.sync()
         known = set(self.config.radios)
         for radio_id in list(self.reachability):
             if radio_id not in known:

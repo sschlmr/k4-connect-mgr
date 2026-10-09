@@ -45,12 +45,16 @@ therefore never opens a session. Passwords are never derived from a previous val
 there is deliberately no configurable seed. Any new code path that ends a session must go
 through `AssignmentManager.end_assignment` so the lockout happens.
 
-**Known gap (hardware-verified 2026-10-09):** the lockout stops *new* connections only. A
-real K4 keeps an already-attached client after `RRP<new>;` + `RRC0;`, and the Programmer's
-Reference (D12) has no server-side disconnect command. The client's watcher therefore
-sends `RRN;` when the session it watched ends (`_end_of_session_disconnect`), but that is
-cooperative. Real enforcement needs the server to own the remote-port path (a relay it can
-cut). The K4 drops clients that go unresponsive for 10 s.
+**The lockout does not drop an attached client** (hardware-verified 2026-10-09): `RRP<new>;` +
+`RRC0;` only stop *new* connections, and the Programmer's Reference (D12) has no
+server-side disconnect. Enforcement therefore comes from `relay.py`: for a radio with
+`relay_port`, members' panels connect to the server, which pumps bytes to
+`host:remote_port` and `end_assignment` calls `relay.cut()` before the lockout. The K4
+drops a silent client within seconds. The relay admits only an ACTIVE session's member,
+from `assignments.client_addr`, which `note_client_addr` refreshes on every watcher poll.
+The remote link is plain TCP (no UDP; verified with a live K4/0). The client watcher also
+sends `RRN;` at session end (`_end_of_session_disconnect`), but that is only cooperative.
+The fake K4 matches the hardware: `RRC0;` leaves its clients attached.
 
 Radios are requested by name — there is no pool of interchangeable radios — so each radio
 has its own wait queue, and "free" is a per-radio question.
@@ -69,11 +73,13 @@ predicate, because callers (the monitor especially) act on snapshots that go sta
 awaits. Orphaned `pending` claims are failed by `abandon_stale_claims` after
 `claim_timeout`. Use `live_assignment_for_*` for "is this radio/user occupied".
 
-### Two addresses per radio
+### Addresses per radio
 
 `host`/`cat_port` is the LAN CAT address, used only by the server and never sent to
-members. `public_host`/`public_port` (required / defaults to `remote_port`) is what members'
-panels dial, exposed by `Radio.public()` as `connect_host`/`connect_port`.
+members. `host`/`remote_port` is the radio's own remote-link port. `relay_port` (optional,
+recommended) is where the server listens and relays to it. `public_host`/`public_port`
+(required / defaults to `relay_port`, else `remote_port`) is what members' panels dial,
+exposed by `Radio.public()` as `connect_host`/`connect_port`.
 
 ### Where state lives
 
@@ -100,7 +106,9 @@ enforcing session deadlines (an *acked* session ends at its deadline; an unacked
 directly with shortened timers — keep it that way.
 
 `create_app(..., background=False)` suppresses the monitor and backup loops; the test
-fixtures rely on this.
+fixtures rely on this. The relay is started by the app's lifespan regardless (it isn't a
+loop, and relayed radios are unreachable without it). `tests/test_relay.py` drives
+`manager.relay.sync()` directly.
 
 `power.py`: powering *off* is CAT (`PS0;`), but powering *on* cannot be done in software —
 a K4 accepts no commands while off and has no Wake-on-LAN — so it is delegated to a shell
@@ -122,11 +130,13 @@ httpx buries `ssl.SSLError` inside `ConnectError` — a mismatch must produce th
 refuses plain `http://` to anything but localhost.
 
 `radio.py` drives the user's own K4/K4-0: `RRT<host>:<port>?<password>;` to connect,
-`RRN;` to disconnect. A successful connect is *silent* on the K4, so success is confirmed
-by polling `CC;`. Failure *may* arrive asynchronously as `RRT!;` (hence
-`CatClient.request`'s `error_prefix`), but a real K4/0 refuses a wrong password silently,
-so a link not confirmed by `CONNECT_TIMEOUT` is also a failure. The fake's
-`silent_refusal` flag models that.
+`RRN;` to disconnect. The panel's own `CC;` is **no evidence**: a real K4/0 reads `CC-1`
+for ~10 s after any `RRT`, even to a dead port, and refuses a wrong password silently
+(no `RRT!`). So `_connect` takes an `attached` callable, in practice
+`GET /assignments/current/link`, which reads the *central* radio's client count, and a
+link not confirmed by `CONNECT_TIMEOUT` is a failure. `RRT!;` is still honoured as an
+early refusal (hence `CatClient.request`'s `error_prefix`). The fake models both quirks
+with `silent_refusal` and `refused_cc_window`.
 
 ### CAT layer (`src/k4cm/cat.py`)
 

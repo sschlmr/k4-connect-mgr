@@ -140,3 +140,37 @@ def test_radio_entry_requires_public_host(tmp_path):
     path.write_text('[[radios]]\nid = "k4a"\nhost = "10.0.0.11"\n', encoding="utf-8")
     with pytest.raises(ValueError, match="public_host"):
         load_config(path=path, data_dir=tmp_path)
+
+
+# -- database upgrades -----------------------------------------------------
+
+
+def test_a_0_1_0_database_gains_the_client_addr_column(tmp_path):
+    import sqlite3
+    from datetime import timedelta
+
+    from k4cm.models import utcnow
+    from k4cm.server.db import Database
+
+    path = tmp_path / "k4cm.db"
+    with sqlite3.connect(path) as old:
+        old.execute(
+            "CREATE TABLE assignments (id INTEGER PRIMARY KEY AUTOINCREMENT, radio_id TEXT NOT NULL,"
+            " callsign TEXT NOT NULL, password TEXT NOT NULL, started_at TEXT NOT NULL,"
+            " expires_at TEXT NOT NULL, state TEXT NOT NULL, acked INTEGER NOT NULL DEFAULT 0,"
+            " ended_at TEXT, end_reason TEXT NOT NULL DEFAULT '')"
+        )
+
+    db = Database(path)
+    try:
+        claim = db.claim_radio("k4a", "W1AW", "pw", utcnow() + timedelta(hours=1), "203.0.113.5")
+        assert db.get_assignment(claim.id).client_addr == "203.0.113.5"
+    finally:
+        db.close()
+
+
+def test_relay_port_becomes_the_default_public_port():
+    radio = Radio.from_dict({"id": "k4a", "host": "10.0.0.11", "public_host": "mh01.net", "relay_port": 27201})
+    assert radio.connect_port == 27201
+    unrelayed = Radio.from_dict({"id": "k4b", "host": "10.0.0.12", "public_host": "mh01.net"})
+    assert unrelayed.relay_port is None and unrelayed.connect_port == 9204

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from k4cm import cat
 from k4cm.client import radio as local_radio
 from k4cm.client.config import (
     ClientConfig,
@@ -16,6 +17,12 @@ from k4cm.client.config import (
     save_pinned_certificate,
 )
 from k4cm.server import tls
+
+
+def attached_to(fake):
+    """Stands in for the server's link check: does the central fake see a client?"""
+    return lambda: fake.client_count >= 1
+
 
 # -- configuration ---------------------------------------------------------
 
@@ -126,7 +133,7 @@ async def test_connect_drives_the_local_panel(server):
     import asyncio
 
     message = await asyncio.to_thread(
-        local_radio.connect, config, "127.0.0.1", server.radio_a.remote_port, "session-password"
+        local_radio.connect, config, "127.0.0.1", server.radio_a.remote_port, "session-password", attached_to(server.radio_a)
     )
 
     assert "connected" in message
@@ -149,7 +156,7 @@ async def test_connect_reports_a_refused_password(server):
 
     with pytest.raises(local_radio.RadioError, match="RRT!"):
         await asyncio.to_thread(
-            local_radio.connect, config, "127.0.0.1", server.radio_a.remote_port, "wrong-password"
+            local_radio.connect, config, "127.0.0.1", server.radio_a.remote_port, "wrong-password", attached_to(server.radio_a)
         )
 
 
@@ -172,8 +179,34 @@ async def test_connect_fails_when_a_refusal_is_silent(server, monkeypatch):
 
     with pytest.raises(local_radio.RadioError, match="did not connect"):
         await asyncio.to_thread(
-            local_radio.connect, config, "127.0.0.1", server.radio_a.remote_port, "wrong-password"
+            local_radio.connect, config, "127.0.0.1", server.radio_a.remote_port, "wrong-password", attached_to(server.radio_a)
         )
+
+
+async def test_connect_does_not_trust_the_panels_own_cc(server, monkeypatch):
+    # A real K4/0 reports CC-1 while a connect is still failing. The client
+    # must wait for the central radio to confirm instead.
+    server.radio_a.password = "the-real-one"
+    server.radio_a.rrc = 1
+    server.local_radio.silent_refusal = True
+    server.local_radio.refused_cc_window = 10.0
+    monkeypatch.setattr(local_radio, "CONNECT_TIMEOUT", 1.5)
+    config = ClientConfig(
+        server_url="https://mh01.net",
+        callsign="W1AW",
+        api_key="k",
+        radio_host="127.0.0.1",
+        radio_cat_port=server.local_radio.cat_port,
+    )
+
+    import asyncio
+
+    with pytest.raises(local_radio.RadioError, match="did not connect"):
+        await asyncio.to_thread(
+            local_radio.connect, config, "127.0.0.1", server.radio_a.remote_port, "wrong-password",
+            attached_to(server.radio_a),
+        )
+    assert await cat.client_count("127.0.0.1", server.local_radio.cat_port) == -1, "the fake should mislead"
 
 
 async def test_disconnect_sends_rrn(server):
@@ -190,7 +223,7 @@ async def test_disconnect_sends_rrn(server):
     import asyncio
 
     await asyncio.to_thread(
-        local_radio.connect, config, "127.0.0.1", server.radio_a.remote_port, "pw"
+        local_radio.connect, config, "127.0.0.1", server.radio_a.remote_port, "pw", attached_to(server.radio_a)
     )
     assert server.radio_a.client_count == 1
 
@@ -230,7 +263,7 @@ async def test_watcher_disconnects_the_panel_when_the_session_ends(server, monke
         radio_host="127.0.0.1",
         radio_cat_port=server.local_radio.cat_port,
     )
-    await asyncio.to_thread(local_radio.connect, config, "127.0.0.1", server.radio_a.remote_port, "pw")
+    await asyncio.to_thread(local_radio.connect, config, "127.0.0.1", server.radio_a.remote_port, "pw", attached_to(server.radio_a))
     monkeypatch.setattr(client_main, "POLL_SECONDS", 0)
 
     await asyncio.to_thread(client_main._watch_loop, _ScriptedApi(_LIVE_SESSION, _NO_SESSION), config)
@@ -253,7 +286,7 @@ async def test_watcher_leaves_the_panel_alone_when_it_saw_no_session(server, mon
         radio_host="127.0.0.1",
         radio_cat_port=server.local_radio.cat_port,
     )
-    await asyncio.to_thread(local_radio.connect, config, "127.0.0.1", server.radio_a.remote_port, "pw")
+    await asyncio.to_thread(local_radio.connect, config, "127.0.0.1", server.radio_a.remote_port, "pw", attached_to(server.radio_a))
     monkeypatch.setattr(client_main, "POLL_SECONDS", 0)
 
     await asyncio.to_thread(client_main._watch_loop, _ScriptedApi(_NO_SESSION), config)

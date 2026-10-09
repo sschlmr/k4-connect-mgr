@@ -57,8 +57,12 @@ class AuthThrottle:
         return min(THROTTLE_BASE_DELAY * (2 ** (count - 2)), THROTTLE_MAX_DELAY)
 
 
+def client_address(request: Request) -> str | None:
+    return request.client.host if request.client else None
+
+
 def _source_of(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
+    return client_address(request) or "unknown"
 
 
 async def require_user(

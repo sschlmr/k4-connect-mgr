@@ -51,6 +51,16 @@ poll_interval_seconds = 30
 disconnect_grace_minutes = 5
 cat_timeout_seconds = 5.0
 
+[relay]
+# For radios with relay_port set, members' panels connect to this server, which
+# passes the link on to the radio and cuts it when the session ends. A K4 does
+# not disconnect an attached panel by itself, so this is what makes the end of
+# a session stick. Address to listen on for relayed radios:
+bind = "0.0.0.0"
+# Admit only the address the member last reached this server's API from. Turn
+# off only if members' panels and computers reach the internet differently.
+check_address = true
+
 [storage]
 database = "k4cm.db"
 log_level = "INFO"
@@ -66,15 +76,20 @@ retention = 14
 # --- Radio inventory -------------------------------------------------------
 # One [[radios]] block per central-site K4.
 #
-# Each radio has two addresses:
+# Each radio has these addresses:
 #   host / cat_port          how this server reaches the radio on the site LAN.
 #                            Never forward the CAT port to the internet: CAT has
 #                            no authentication.
+#   host / remote_port       the radio's own remote-link port on the LAN.
+#   relay_port               (recommended) a port on THIS server that relays the
+#                            remote link, so the server can cut it when a session
+#                            ends. Forward the public port to this server's
+#                            relay_port, never to the radio.
 #   public_host / public_port where members' panels connect from home — the
-#                            site's public name or IP and the port forwarded to
-#                            this radio's remote_port. public_port defaults to
+#                            site's public name or IP and the forwarded port.
+#                            public_port defaults to relay_port if set, else
 #                            remote_port. If members reach the site over a VPN,
-#                            public_host can simply equal host.
+#                            public_host can be this server's LAN address.
 
 # [[radios]]
 # id = "k4a"
@@ -82,6 +97,7 @@ retention = 14
 # host = "10.0.0.11"
 # cat_port = 9200
 # remote_port = 9204
+# relay_port = 9204
 # public_host = "mh01.net"
 # public_port = 9204
 # enabled = true
@@ -154,6 +170,12 @@ class MonitorSettings:
 
 
 @dataclass
+class RelaySettings:
+    bind: str = "0.0.0.0"
+    check_address: bool = True
+
+
+@dataclass
 class StorageSettings:
     database: str = "k4cm.db"
     log_level: str = "INFO"
@@ -176,6 +198,7 @@ class ServerConfig:
     server: ServerSettings = field(default_factory=ServerSettings)
     session: SessionSettings = field(default_factory=SessionSettings)
     monitor: MonitorSettings = field(default_factory=MonitorSettings)
+    relay: RelaySettings = field(default_factory=RelaySettings)
     storage: StorageSettings = field(default_factory=StorageSettings)
     backup: BackupSettings = field(default_factory=BackupSettings)
     radios: dict[str, Radio] = field(default_factory=dict)
@@ -262,6 +285,7 @@ def load_config(path: Path | None = None, data_dir: Path | None = None) -> Serve
         server=_section(raw, "server", ServerSettings),
         session=_section(raw, "session", SessionSettings),
         monitor=_section(raw, "monitor", MonitorSettings),
+        relay=_section(raw, "relay", RelaySettings),
         storage=_section(raw, "storage", StorageSettings),
         backup=_section(raw, "backup", BackupSettings),
         radios=_parse_radios(raw),

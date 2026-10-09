@@ -101,11 +101,36 @@ async def test_connected_panel_reads_cc_minus_one(panel, remote, observed):
         await make_idle(panel)
 
 
+async def test_panel_cc_is_no_proof_of_connection(panel, observed):
+    """A K4/0 reads CC-1 while a connect is still failing (observed 2026-10-09),
+    which is why the client confirms through the server instead. Dials the
+    panel's own loopback, where nothing listens."""
+    await make_idle(panel)
+    try:
+        async with cat.CatClient(*address(panel)) as client:
+            await client.send("RRT127.0.0.1:1?nothing-listens;")
+            await asyncio.sleep(0.5)
+            first = cat.parse_client_count(await client.request("CC;"))
+        observed.record("rrt_nowhere.first_cc", first)
+        seen = await wait_for_count(panel, lambda v: v == 0, REFUSAL_WAIT_S + 5)
+        observed.record("rrt_nowhere.cc_sequence", seen)
+        assert seen[-1] == 0, f"a connect to nowhere should end idle, saw {seen}"
+    finally:
+        await make_idle(panel)
+
+
 async def test_client_connect_and_disconnect_code_work_on_real_hardware(panel, remote, observed):
     await make_idle(panel)
     host, port = address(panel)
     try:
-        detail = await local_radio._connect(host, port, remote["host"], int(remote["port"]), remote["password"])
+        # Without a server or the remote's CAT port, nothing can confirm the
+        # link from the far end, so this accepts the panel's word (CC-1) after
+        # the ~10 s in which a failing connect also reads CC-1.
+        detail = await local_radio._connect(
+            host, port, remote["host"], int(remote["port"]), remote["password"], lambda: True
+        )
+        await asyncio.sleep(REFUSAL_WAIT_S)
+        assert await client_count(panel) == -1, "the panel did not stay connected"
         observed.record("client_connect.detail", detail)
         assert detail.startswith("connected"), detail
     finally:
@@ -195,8 +220,13 @@ async def test_site_applies_rrc(site_restored):
 
 
 async def test_full_session_lifecycle_locks_the_member_out(site_restored, panel, tmp_path, observed):
-    """The security model end to end: assign, connect, release, and prove that
-    both the live link and the old password are dead."""
+    """The security model end to end on an unrelayed radio: assign, connect,
+    release, and prove the old password is dead.
+
+    The live link is *not* expected to drop: a K4 keeps an attached client
+    after RRC0; (observed 2026-10-09), which is why the server relays the
+    remote link. What it does here is recorded, so a firmware change shows up.
+    """
     site = site_restored
     radio = Radio(
         id="hw",
@@ -217,7 +247,12 @@ async def test_full_session_lifecycle_locks_the_member_out(site_restored, panel,
         password = assignment["password"]
 
         detail = await local_radio._connect(
-            panel_host, panel_port, assignment["radio"]["connect_host"], assignment["radio"]["connect_port"], password
+            panel_host,
+            panel_port,
+            assignment["radio"]["connect_host"],
+            assignment["radio"]["connect_port"],
+            password,
+            lambda: asyncio.run(client_count(site)) >= 1,
         )
         observed.record("lifecycle.connect", detail)
         assert detail.startswith("connected"), detail
@@ -229,7 +264,8 @@ async def test_full_session_lifecycle_locks_the_member_out(site_restored, panel,
 
         panel_seen = await wait_for_count(panel, lambda v: v == 0)
         observed.record("lifecycle.panel_cc_after_release", panel_seen)
-        assert panel_seen[-1] == 0, f"SECURITY: RRC0; did not drop the attached panel (CC values: {panel_seen})"
+        observed.record("lifecycle.lockout_dropped_attached_panel", panel_seen[-1] == 0)
+        await make_idle(panel)
 
         # Reopen the radio under a new password, then retry the old one.
         await cat.send_commands(radio.host, radio.cat_port, [f"RRP{new_password()};", "RRC1;"])

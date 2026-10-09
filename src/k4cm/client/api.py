@@ -92,6 +92,9 @@ class ServerApi:
     def session_state(self) -> dict:
         return self._request("GET", "/assignments/current")
 
+    def link_state(self) -> dict:
+        return self._request("GET", "/assignments/current/link")
+
     def ack(self) -> dict:
         return self._request("POST", "/assignments/current/ack")
 

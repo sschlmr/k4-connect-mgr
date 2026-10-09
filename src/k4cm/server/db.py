@@ -8,6 +8,9 @@ exist per radio and per callsign. Two simultaneous requests cannot both win,
 whatever the interleaving — the loser's INSERT fails and becomes ClaimConflict.
 Every later state change is conditional on the state it expects, so a session
 that someone else has already ended is never ended (or extended) again.
+
+There is no migration framework: the schema is CREATE ... IF NOT EXISTS, and
+the few columns added since 0.1.0 are back-filled by `_add_missing_columns`.
 """
 
 from __future__ import annotations
@@ -48,7 +51,8 @@ CREATE TABLE IF NOT EXISTS assignments (
     state       TEXT NOT NULL,
     acked       INTEGER NOT NULL DEFAULT 0,
     ended_at    TEXT,
-    end_reason  TEXT NOT NULL DEFAULT ''
+    end_reason  TEXT NOT NULL DEFAULT '',
+    client_addr TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_assignments_state ON assignments(state);
 CREATE INDEX IF NOT EXISTS idx_assignments_radio ON assignments(radio_id, state);
@@ -76,6 +80,12 @@ CREATE TABLE IF NOT EXISTS audit (
 CREATE INDEX IF NOT EXISTS idx_audit_time ON audit(timestamp);
 """
 
+# Columns added after the first release: (table, column, declaration). Existing
+# databases get them via ALTER TABLE on open; new ones already have them.
+ADDED_COLUMNS = [
+    ("assignments", "client_addr", "TEXT"),
+]
+
 
 def _to_user(row: sqlite3.Row) -> User:
     return User(
@@ -98,6 +108,7 @@ def _to_assignment(row: sqlite3.Row) -> Assignment:
         acked=bool(row["acked"]),
         ended_at=parse_dt(row["ended_at"]) if row["ended_at"] else None,
         end_reason=row["end_reason"],
+        client_addr=row["client_addr"],
     )
 
 
@@ -135,7 +146,14 @@ class Database:
     def initialize(self) -> None:
         with self._lock:
             self._conn.executescript(SCHEMA)
+            self._add_missing_columns()
             self._conn.commit()
+
+    def _add_missing_columns(self) -> None:
+        for table, column, declaration in ADDED_COLUMNS:
+            existing = {row["name"] for row in self._conn.execute(f"PRAGMA table_info({table})")}
+            if column not in existing:
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
     def close(self) -> None:
         with self._lock:
@@ -209,7 +227,12 @@ class Database:
     # -- assignments -------------------------------------------------------
 
     def claim_radio(
-        self, radio_id: str, callsign: str, password: str, expires_at: datetime
+        self,
+        radio_id: str,
+        callsign: str,
+        password: str,
+        expires_at: datetime,
+        client_addr: str | None = None,
     ) -> Assignment:
         """Atomically reserve a radio for a caller as a PENDING session.
 
@@ -221,8 +244,8 @@ class Database:
             try:
                 cur = self._conn.execute(
                     "INSERT INTO assignments"
-                    " (radio_id, callsign, password, started_at, expires_at, state, acked)"
-                    " VALUES (?, ?, ?, ?, ?, ?, 0)",
+                    " (radio_id, callsign, password, started_at, expires_at, state, acked, client_addr)"
+                    " VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
                     (
                         radio_id,
                         callsign,
@@ -230,6 +253,7 @@ class Database:
                         isoformat(now),
                         isoformat(expires_at),
                         AssignmentState.PENDING.value,
+                        client_addr,
                     ),
                 )
             except sqlite3.IntegrityError as e:
@@ -245,6 +269,7 @@ class Database:
             started_at=now,
             expires_at=expires_at,
             state=AssignmentState.PENDING,
+            client_addr=client_addr,
         )
 
     def activate(self, assignment_id: int) -> bool:
@@ -342,6 +367,18 @@ class Database:
             cur = self._conn.execute(
                 "UPDATE assignments SET expires_at = ?, acked = 0 WHERE id = ? AND state = ?",
                 (isoformat(expires_at), assignment_id, AssignmentState.ACTIVE.value),
+            )
+            self._conn.commit()
+        return cur.rowcount == 1
+
+    def set_client_addr(self, assignment_id: int, client_addr: str) -> bool:
+        """Record where a live session's member is calling from. False if the
+        session has ended or the address is unchanged."""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE assignments SET client_addr = ?"
+                " WHERE id = ? AND state IN (?, ?) AND client_addr IS NOT ?",
+                (client_addr, assignment_id, *_LIVE, client_addr),
             )
             self._conn.commit()
         return cur.rowcount == 1
