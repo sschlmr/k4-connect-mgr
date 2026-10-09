@@ -40,9 +40,19 @@ each has its own wait queue.
 
 ## Installing
 
+Installers for every platform are on the
+[Releases page](https://github.com/sschlmr/k4-connect-mgr/releases/latest):
+
+| File | Who installs it |
+|---|---|
+| `k4cm-server-setup.exe` | The site administrator, on the Windows machine at the K4 site |
+| `k4cm-client-setup.exe` | Members on Windows |
+| `k4cm-client-<version>.pkg` | Members on macOS |
+| `k4cm-client-<version>-linux-<arch>.tar.gz` (or `.deb`) | Members on Linux |
+
 ### Server (Windows, at the K4 site)
 
-Run `k4cm-server-setup.exe`. It installs into `Program Files\K4 Connect Manager`,
+Download and run `k4cm-server-setup.exe`. It installs into `Program Files\K4 Connect Manager`,
 registers two Task Scheduler jobs (start at boot, plus a watchdog every five
 minutes that probes `/health` and relaunches the server if it is not
 answering), and installs the Microsoft VC++ runtime if that is missing.
@@ -95,7 +105,8 @@ members reach the site over a VPN instead, set `public_host` to the LAN address.
 
 ### Client (Windows, macOS, Linux)
 
-Install the package for your platform, then:
+Download and install the client package for your platform from the
+[Releases page](https://github.com/sschlmr/k4-connect-mgr/releases/latest), then:
 
 ```
 k4cm config
@@ -109,7 +120,7 @@ becomes the only certificate this machine will accept from the server.
 On any machine with Python 3.11+ you can skip the installers entirely:
 
 ```
-pipx install k4-connect-mgr
+pipx install git+https://github.com/sschlmr/k4-connect-mgr
 ```
 
 See [packaging/README.md](packaging/README.md) for building the installers, and

@@ -92,3 +92,26 @@ jobs:
           path: |
             packaging/out/*.tar.gz
             packaging/out/*.deb
+
+  # A tag publishes every installer as a GitHub Release, which is the download
+  # page members are sent to. Workflow artifacts alone expire and need a login.
+  # A tag with a suffix (v0.1.0-rc1) is marked as a pre-release.
+  release:
+    needs: [windows-server, windows-client, macos-client, linux-client]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l release
+          flags=(--generate-notes --title "K4 Connect Manager ${GITHUB_REF_NAME#v}")
+          [[ "$GITHUB_REF_NAME" == *-* ]] && flags+=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" release/* --repo "$GITHUB_REPOSITORY" "${flags[@]}"
