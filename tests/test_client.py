@@ -200,6 +200,68 @@ async def test_disconnect_sends_rrn(server):
     assert "RRN" in server.local_radio.commands
 
 
+class _ScriptedApi:
+    """Stands in for ServerApi.session_state() with a fixed sequence of answers."""
+
+    def __init__(self, *states):
+        self.states = list(states)
+
+    def session_state(self):
+        return self.states.pop(0)
+
+
+_LIVE_SESSION = {"assignment": {"expiring": False, "acked": False}, "offer": None, "queued": None}
+_NO_SESSION = {"assignment": None, "offer": None, "queued": None}
+
+
+async def test_watcher_disconnects_the_panel_when_the_session_ends(server, monkeypatch):
+    # A real K4 keeps an attached client after RRC0;, so the client must drop
+    # the link itself when the session it is watching ends.
+    import asyncio
+
+    from k4cm.client import main as client_main
+
+    server.radio_a.password = "pw"
+    server.radio_a.rrc = 1
+    config = ClientConfig(
+        server_url="https://mh01.net",
+        callsign="W1AW",
+        api_key="k",
+        radio_host="127.0.0.1",
+        radio_cat_port=server.local_radio.cat_port,
+    )
+    await asyncio.to_thread(local_radio.connect, config, "127.0.0.1", server.radio_a.remote_port, "pw")
+    monkeypatch.setattr(client_main, "POLL_SECONDS", 0)
+
+    await asyncio.to_thread(client_main._watch_loop, _ScriptedApi(_LIVE_SESSION, _NO_SESSION), config)
+
+    assert "RRN" in server.local_radio.commands
+    assert server.radio_a.client_count == 0
+
+
+async def test_watcher_leaves_the_panel_alone_when_it_saw_no_session(server, monkeypatch):
+    import asyncio
+
+    from k4cm.client import main as client_main
+
+    server.radio_a.password = "pw"
+    server.radio_a.rrc = 1
+    config = ClientConfig(
+        server_url="https://mh01.net",
+        callsign="W1AW",
+        api_key="k",
+        radio_host="127.0.0.1",
+        radio_cat_port=server.local_radio.cat_port,
+    )
+    await asyncio.to_thread(local_radio.connect, config, "127.0.0.1", server.radio_a.remote_port, "pw")
+    monkeypatch.setattr(client_main, "POLL_SECONDS", 0)
+
+    await asyncio.to_thread(client_main._watch_loop, _ScriptedApi(_NO_SESSION), config)
+
+    assert "RRN" not in server.local_radio.commands
+    assert server.radio_a.client_count == 1
+
+
 async def test_unreachable_local_radio_is_reported(server):
     dead = server.config.find_radio("k4dead")
     config = ClientConfig(

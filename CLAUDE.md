@@ -45,6 +45,13 @@ therefore never opens a session. Passwords are never derived from a previous val
 there is deliberately no configurable seed. Any new code path that ends a session must go
 through `AssignmentManager.end_assignment` so the lockout happens.
 
+**Known gap (hardware-verified 2026-10-09):** the lockout stops *new* connections only. A
+real K4 keeps an already-attached client after `RRP<new>;` + `RRC0;`, and the Programmer's
+Reference (D12) has no server-side disconnect command. The client's watcher therefore
+sends `RRN;` when the session it watched ends (`_end_of_session_disconnect`), but that is
+cooperative. Real enforcement needs the server to own the remote-port path (a relay it can
+cut). The K4 drops clients that go unresponsive for 10 s.
+
 Radios are requested by name — there is no pool of interchangeable radios — so each radio
 has its own wait queue, and "free" is a per-radio question.
 

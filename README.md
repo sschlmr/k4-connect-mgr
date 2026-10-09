@@ -195,6 +195,12 @@ are never left tied up. Separately, `[monitor] disconnect_grace_minutes`
 - All client/server traffic is HTTPS. The client refuses `http://` for anything
   but localhost, so API keys and radio passwords never cross the network in the
   clear.
+- **A session's end does not disconnect a member who is still connected.** A
+  K4 keeps an attached panel after its password is changed and `RRC0;` is sent;
+  those only stop *new* connections. The client disconnects your panel when the
+  session it is watching ends, but a member who connected by hand, or isn't
+  running the watcher, stays on until they disconnect. Server-side enforcement
+  is planned.
 - Trust is a pinned self-signed certificate, confirmed by fingerprint at setup.
   If the certificate changes, every call fails loudly until the user re-runs
   `k4cm config` — rotate deliberately and tell your users.

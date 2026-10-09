@@ -340,6 +340,7 @@ def watch() -> None:
 def _watch_loop(api: ServerApi, cfg: ClientConfig) -> None:
     typer.echo("\nWatching your session — Ctrl-C to stop (your session keeps running).")
     warned_expiring = False
+    saw_session = False
     try:
         while True:
             try:
@@ -352,6 +353,7 @@ def _watch_loop(api: ServerApi, cfg: ClientConfig) -> None:
             assignment, offer, queued = state.get("assignment"), state.get("offer"), state.get("queued")
 
             if assignment:
+                saw_session = True
                 if assignment["expiring"] and not assignment["acked"]:
                     if _negotiate_timeout(api, cfg, assignment):
                         return
@@ -372,12 +374,28 @@ def _watch_loop(api: ServerApi, cfg: ClientConfig) -> None:
                 typer.echo("\a")
                 warn("Your session has ended (released, reclaimed, expired, or force-released).")
                 if cfg.has_local_radio:
-                    typer.echo(f"Local radio: {local_radio.local_state(cfg)}")
+                    typer.echo(f"Local radio: {_end_of_session_disconnect(cfg, saw_session)}")
                 return
 
             time.sleep(POLL_SECONDS)
     except KeyboardInterrupt:
         typer.echo("\nStopped watching. Your session is unaffected.")
+
+
+def _end_of_session_disconnect(cfg: ClientConfig, saw_session: bool) -> str:
+    """Drop the panel's link once the session we were watching is over.
+
+    A real K4 does not disconnect an attached client when the server locks it
+    (RRC0; stops new connections only), so without this the member's panel
+    would stay on a radio the server already considers free. Only done when
+    this watch saw the session, so a panel linked elsewhere is left alone.
+    """
+    if not saw_session:
+        return local_radio.local_state(cfg)
+    try:
+        return local_radio.disconnect(cfg)
+    except local_radio.RadioError as e:
+        return f"could not disconnect it ({e}) — press DISCONNECT on the panel"
 
 
 def _negotiate_timeout(api: ServerApi, cfg: ClientConfig, assignment: dict[str, Any]) -> bool:
