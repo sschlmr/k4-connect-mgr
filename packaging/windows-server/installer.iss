@@ -95,8 +95,7 @@ begin
   { Download with PowerShell - present on every supported Windows version. }
   DownloadCmd := Format(
     '-NoProfile -ExecutionPolicy Bypass -Command "try { [Net.ServicePointManager]::SecurityProtocol = ''Tls12''; ' +
-    'Invoke-WebRequest -Uri ''%s'' -OutFile ''%s'' -UseBasicParsing; exit 0 } catch { exit 1 }"',
-    [VCRedistUrl, TempFile]);
+    'Invoke-WebRequest -Uri ''%s'' -OutFile ''%s'' -UseBasicParsing; exit 0 } catch { exit 1 }"', [VCRedistUrl, TempFile]);
 
   if not Exec('powershell.exe', DownloadCmd, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
   begin
