@@ -5,6 +5,8 @@
 #
 # Produces packaging/out/k4cm-client-<version>.pkg, which installs the runtime
 # folder into /usr/local/libexec/k4cm and a symlink at /usr/local/bin/k4cm.
+# Installing over an older version is an upgrade: scripts/preinstall clears the
+# old program folder first. ~/.config/k4cm (settings, pinned cert) is kept.
 # Run from the project root.
 #
 # If PyInstaller fails with: codesign ... "Operation not permitted",
@@ -46,6 +48,7 @@ pkgbuild \
     --identifier "$IDENTIFIER" \
     --version "$VERSION" \
     --install-location / \
+    --scripts "$ROOT/packaging/macos-client/scripts" \
     "$OUT/k4cm-client-$VERSION.pkg"
 
 echo

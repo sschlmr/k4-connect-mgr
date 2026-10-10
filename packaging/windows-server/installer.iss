@@ -32,6 +32,11 @@ PrivilegesRequired=admin
 UninstallDisplayIcon={app}\{#ServerExe}
 WizardStyle=modern
 
+[InstallDelete]
+; Upgrading: clear the old runtime so no stale files remain. The running server
+; is stopped first, in PrepareToInstall. Site data in ProgramData is untouched.
+Type: filesandordirs; Name: "{app}\_internal"
+
 [Files]
 ; The PyInstaller one-folder build (carries its own Python runtime).
 Source: "..\..\dist\k4cm-server\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -127,9 +132,27 @@ begin
     Result := Format('The Microsoft VC++ runtime installer failed with code %d.', [ResultCode]);
 end;
 
+{ ---- Upgrades -------------------------------------------------------------
+  A running server holds its files open, and the watchdog relaunches it every
+  five minutes, so both are stopped before files are copied. [Run] re-creates
+  the tasks (enabled) and starts the server again afterwards. On a first
+  install the tasks do not exist yet and these commands simply fail quietly. }
+
+procedure StopRunningServer;
+var
+  ResultCode: Integer;
+begin
+  Exec('schtasks.exe', '/Change /TN "{#TaskWatchdog}" /DISABLE', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('schtasks.exe', '/End /TN "{#TaskServer}"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('taskkill.exe', '/IM {#ServerExe} /F', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Sleep(2000);  { let Windows release the file handles }
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   Result := '';
+  WizardForm.PreparingLabel.Caption := 'Stopping the running server...';
+  StopRunningServer;
   if not IsVCRedistInstalled then
   begin
     WizardForm.PreparingLabel.Caption := 'Installing a required Microsoft runtime...';

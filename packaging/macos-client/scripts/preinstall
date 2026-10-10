@@ -1,0 +1,12 @@
+#!/bin/sh
+# Runs before the package's files are laid down. macOS Installer only adds and
+# replaces files, so remove the previous program folder first: an upgrade then
+# leaves nothing stale behind. User settings (~/.config/k4cm) are not touched.
+rm -rf /usr/local/libexec/k4cm
+# Only our own symlink; never a k4cm installed some other way (e.g. pipx).
+if [ -L /usr/local/bin/k4cm ]; then
+    case "$(readlink /usr/local/bin/k4cm)" in
+        *libexec/k4cm/k4cm) rm -f /usr/local/bin/k4cm ;;
+    esac
+fi
+exit 0

@@ -26,6 +26,13 @@ safe:
 - Client: `%APPDATA%\k4cm\` (Windows) or `~/.config/k4cm/` (macOS, Linux) —
   `config.toml` and the pinned `server-cert.pem`
 
+Installing a new version over an old one is an upgrade, and each installer
+clears the old program files first so nothing stale is left behind: the macOS
+package with a `preinstall` script (`macos-client/scripts/`), the Windows
+installers with `[InstallDelete]`. The Windows server installer also stops the
+running server and its watchdog before copying files (they would otherwise hold
+them locked), then re-registers both tasks and starts the server again.
+
 Uninstalling removes the program files and, on the server, the scheduled tasks.
 Both uninstallers tell the user where the data was left.
 

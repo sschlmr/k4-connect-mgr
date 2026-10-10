@@ -29,6 +29,11 @@ ChangesEnvironment=yes
 UninstallDisplayIcon={app}\{#ClientExe}
 WizardStyle=modern
 
+[InstallDelete]
+; Installing over an older version: clear the old runtime so no stale files
+; remain. User data in %APPDATA%\k4cm is elsewhere and untouched.
+Type: filesandordirs; Name: "{app}\_internal"
+
 [Files]
 Source: "..\..\dist\k4cm\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
