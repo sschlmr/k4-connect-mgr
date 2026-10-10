@@ -10,6 +10,8 @@
 import os
 import sys
 
+from PyInstaller.utils.hooks import collect_submodules
+
 sys.setrecursionlimit(5000)
 
 project_root = os.path.abspath(os.getcwd())
@@ -20,7 +22,9 @@ a = Analysis(
     pathex=[os.path.join(project_root, "src")],
     binaries=[],
     datas=[],
-    hiddenimports=[],
+    # Typer's --install-completion finds the shell via shellingham, which
+    # imports shellingham.posix / shellingham.nt by name at runtime.
+    hiddenimports=collect_submodules("shellingham"),
     excludes=["tkinter", "matplotlib", "pytest", "uvicorn", "fastapi"],
     noarchive=False,
 )

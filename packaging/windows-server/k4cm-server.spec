@@ -5,6 +5,8 @@
 import os
 import sys
 
+from PyInstaller.utils.hooks import collect_submodules
+
 sys.setrecursionlimit(5000)
 
 project_root = os.path.abspath(os.path.join(os.getcwd()))
@@ -25,6 +27,8 @@ a = Analysis(
         "uvicorn.protocols.websockets.auto",
         "uvicorn.lifespan.on",
         "uvicorn.lifespan.off",
+        # Typer's --install-completion: shellingham imports these by name.
+        *collect_submodules("shellingham"),
     ],
     hookspath=[],
     runtime_hooks=[],
