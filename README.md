@@ -134,6 +134,16 @@ issued, fetches the server's certificate, and shows you its fingerprint to
 confirm against the published one. The confirmed certificate is pinned and
 becomes the only certificate this machine will accept from the server.
 
+Tab completion is optional: `k4cm --install-completion`, then open a new
+terminal. **On a Mac using bash**, it writes the setup to `~/.bashrc`, which
+Terminal's login shells never read, so also run this once:
+
+```
+echo '[ -f ~/.bash_completions/k4cm.sh ] && . ~/.bash_completions/k4cm.sh' >> ~/.bash_profile
+```
+
+zsh (the macOS default since Catalina), Linux and Windows PowerShell need nothing extra.
+
 On any machine with Python 3.11+ you can skip the installers entirely:
 
 ```
