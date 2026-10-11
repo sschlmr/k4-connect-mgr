@@ -211,7 +211,12 @@ are never left tied up. Separately, `[monitor] disconnect_grace_minutes`
 
 ## Operations
 
-- **Logs**: `C:\ProgramData\k4cm\logs\k4cm-server.log`, rotated.
+- **Logs**: `C:\ProgramData\k4cm\logs\k4cm-server.log`, rotated. If the server
+  won't stay up, look here first: a reason it cannot start (a `server.toml`
+  mistake, a missing certificate, a port already in use) is logged as
+  `cannot start: ...`. `watchdog.log` beside it records each restart; to run
+  the server by hand while investigating, disable the **K4CM Server Watchdog**
+  task first.
 - **Audit trail**: every assignment, release, extension, reclaim, admin action,
   power action and failed login, in the database and readable with
   `k4cm admin audit`.

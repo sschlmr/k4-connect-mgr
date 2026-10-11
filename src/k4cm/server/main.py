@@ -19,7 +19,7 @@ from .auth import generate_api_key, hash_api_key
 from .backup import run_backup
 from .config import default_config_path, load_config, write_default_config
 from .db import Database
-from .logging_setup import configure_logging
+from .logging_setup import configure_logging, log_startup_failure
 
 app = typer.Typer(help="K4 Connect Manager — central server", no_args_is_help=True)
 
@@ -30,16 +30,20 @@ def _data_dir_option() -> Path:
     )
 
 
-def _load(data_dir: Path | None):
+def _load(data_dir: Path | None, starting: bool = False):
+    """Load the config, or exit with the reason. `starting` (the run command)
+    also writes the reason to the log file, where a hidden server's admin looks."""
     resolved = Path(data_dir) if data_dir else server_data_dir()
     try:
         return load_config(data_dir=resolved)
     except FileNotFoundError as e:
-        typer.secho(str(e), fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=2)
+        message = str(e)
     except ValueError as e:
-        typer.secho(f"config error: {e}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=2)
+        message = f"config error: {e}"
+    if starting:
+        log_startup_failure(resolved / "logs" / "k4cm-server.log", message)
+    typer.secho(message, fg=typer.colors.RED, err=True)
+    raise typer.Exit(code=2)
 
 
 @app.command()
@@ -112,25 +116,30 @@ def run(
 
     from .app import create_app
 
-    config = _load(data_dir)
+    config = _load(data_dir, starting=True)
     logger = configure_logging(config)
-    db = Database(config.database_path)
-    application = create_app(config, db, logger)
 
     ssl_args = {}
     if not no_tls:
         if not config.tls_cert_path.exists() or not config.tls_key_path.exists():
-            typer.secho(
-                f"TLS certificate missing ({config.tls_cert_path}). Run 'k4cm-server init' "
+            # The console handler already shows this on stderr.
+            logger.error(
+                "cannot start: TLS certificate missing (%s). Run 'k4cm-server init' "
                 "or pass --no-tls for local development.",
-                fg=typer.colors.RED,
-                err=True,
+                config.tls_cert_path,
             )
             raise typer.Exit(code=2)
         ssl_args = {
             "ssl_certfile": str(config.tls_cert_path),
             "ssl_keyfile": str(config.tls_key_path),
         }
+
+    try:
+        db = Database(config.database_path)
+        application = create_app(config, db, logger)
+    except Exception:
+        logger.exception("cannot start: could not open %s", config.database_path)
+        raise typer.Exit(code=1) from None
 
     scheme = "http" if no_tls else "https"
     bind_host = host or config.server.host

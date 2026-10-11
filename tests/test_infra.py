@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import ssl
 
 import pytest
@@ -174,3 +175,62 @@ def test_relay_port_becomes_the_default_public_port():
     assert radio.connect_port == 27201
     unrelayed = Radio.from_dict({"id": "k4b", "host": "10.0.0.12", "public_host": "mh01.net"})
     assert unrelayed.relay_port is None and unrelayed.connect_port == 9204
+
+
+@pytest.fixture
+def server_loggers():
+    """configure_logging replaces handlers on process-wide loggers; put them back."""
+    names = ("k4cm.server", "uvicorn.error")
+    saved = {n: (logging.getLogger(n).handlers[:], logging.getLogger(n).propagate) for n in names}
+    yield
+    for n, (handlers, propagate) in saved.items():
+        logger = logging.getLogger(n)
+        for h in logger.handlers:
+            if h not in handlers:
+                h.close()
+        logger.handlers[:] = handlers
+        logger.propagate = propagate
+
+
+def _run_server(data_dir):
+    from typer.testing import CliRunner
+
+    from k4cm.server.main import app
+
+    return CliRunner().invoke(app, ["run", "--data-dir", str(data_dir)])
+
+
+def _server_log(data_dir):
+    return (data_dir / "logs" / "k4cm-server.log").read_text(encoding="utf-8")
+
+
+def test_a_missing_config_stops_the_server_and_says_why_in_the_log(tmp_path, server_loggers):
+    # Under Task Scheduler stderr goes nowhere, so the log is all an admin sees.
+    result = _run_server(tmp_path)
+    assert result.exit_code == 2
+    assert "cannot start: server config not found" in _server_log(tmp_path)
+
+
+def test_a_bad_config_stops_the_server_and_says_why_in_the_log(tmp_path, server_loggers):
+    (tmp_path / "server.toml").write_text('[server]\nport = "unterminated\n', encoding="utf-8")
+    result = _run_server(tmp_path)
+    assert result.exit_code == 2
+    assert "cannot start: config error" in _server_log(tmp_path)
+
+
+def test_a_missing_certificate_stops_the_server_and_says_why_in_the_log(tmp_path, server_loggers):
+    write_default_config(tmp_path / "server.toml")
+    result = _run_server(tmp_path)
+    assert result.exit_code == 2
+    log = _server_log(tmp_path)
+    assert "cannot start: TLS certificate missing" in log
+    assert "k4cm-server init" in log
+
+
+def test_uvicorn_startup_errors_reach_the_server_log(tmp_path, server_loggers):
+    from k4cm.server.logging_setup import configure_logging
+
+    write_default_config(tmp_path / "server.toml")
+    configure_logging(load_config(data_dir=tmp_path))
+    logging.getLogger("uvicorn.error").error("[Errno 10048] address already in use")
+    assert "address already in use" in _server_log(tmp_path)
