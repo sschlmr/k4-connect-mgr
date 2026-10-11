@@ -156,6 +156,11 @@ commonly flagged regardless of what they contain).
 
 ## Using it
 
+The member guide, [docs/k4cm-user-guide.md](docs/k4cm-user-guide.md), covers
+all of this for members of the mh01.net station. Every client installer puts a
+copy on the member's machine (Windows: a Start menu shortcut; macOS and Linux:
+`/usr/local/share/doc/k4cm/`).
+
 ```
 k4cm status                 what every K4 is doing, and your own session
 k4cm request k4a            take a specific K4 and connect your panel

@@ -4,7 +4,8 @@
 #   ./packaging/macos-client/build.sh
 #
 # Produces packaging/out/k4cm-client-<version>.pkg, which installs the runtime
-# folder into /usr/local/libexec/k4cm and a symlink at /usr/local/bin/k4cm.
+# folder into /usr/local/libexec/k4cm, a symlink at /usr/local/bin/k4cm, and the
+# member guide at /usr/local/share/doc/k4cm/k4cm-user-guide.md.
 # Installing over an older version is an upgrade: scripts/preinstall clears the
 # old program folder first. ~/.config/k4cm (settings, pinned cert) is kept.
 # Run from the project root.
@@ -33,10 +34,11 @@ fi
 
 echo "==> Staging the package root"
 rm -rf "$STAGE"
-mkdir -p "$STAGE/usr/local/libexec" "$STAGE/usr/local/bin"
+mkdir -p "$STAGE/usr/local/libexec" "$STAGE/usr/local/bin" "$STAGE/usr/local/share/doc/k4cm"
 cp -R dist/k4cm "$STAGE/usr/local/libexec/k4cm"
 chmod -R go-w "$STAGE/usr/local/libexec/k4cm"
 ln -s ../libexec/k4cm/k4cm "$STAGE/usr/local/bin/k4cm"
+install -m 644 docs/k4cm-user-guide.md "$STAGE/usr/local/share/doc/k4cm/"
 
 echo "==> Verifying the staged binary runs"
 "$STAGE/usr/local/libexec/k4cm/k4cm" --help >/dev/null

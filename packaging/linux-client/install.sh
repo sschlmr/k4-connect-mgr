@@ -8,7 +8,9 @@ set -euo pipefail
 
 PREFIX="${PREFIX:-/usr/local}"
 BINDIR="$PREFIX/bin"
-SOURCE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/k4cm"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE="$HERE/k4cm"
+DOCDIR="$PREFIX/share/doc/k4cm"
 
 if [ ! -f "$SOURCE" ]; then
     echo "error: k4cm executable not found next to this script" >&2
@@ -27,6 +29,12 @@ fi
 install -m 755 "$SOURCE" "$BINDIR/k4cm"
 echo "Installed $BINDIR/k4cm"
 
+if [ -f "$HERE/k4cm-user-guide.md" ]; then
+    mkdir -p "$DOCDIR"
+    install -m 644 "$HERE/k4cm-user-guide.md" "$DOCDIR/k4cm-user-guide.md"
+    echo "Installed $DOCDIR/k4cm-user-guide.md"
+fi
+
 case ":$PATH:" in
     *":$BINDIR:"*) ;;
     *) echo "note: $BINDIR is not on your PATH — add it to your shell profile." ;;
@@ -34,3 +42,4 @@ esac
 
 echo
 echo "Next: run 'k4cm config' to set the server address, your callsign and API key."
+echo "The member guide is $DOCDIR/k4cm-user-guide.md"
