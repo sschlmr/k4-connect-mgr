@@ -116,9 +116,10 @@ If members reach the site over a VPN instead, set `public_host` to the server
 PC's LAN address. The installer adds a Windows Firewall rule for the server
 program, which covers the API and every relay port.
 
-A radio without `relay_port` is connected to directly, as in 0.1.0. That still
-works, but ending a session then only stops *new* connections; a member who is
-connected stays on until they disconnect.
+A radio without `relay_port` is connected to directly. That works, but ending a
+session then only stops *new* connections; a member who is connected stays on
+until they disconnect. Use `relay_port` for every radio members reach from the
+internet.
 
 ### Client (Windows, macOS, Linux)
 
