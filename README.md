@@ -169,6 +169,11 @@ k4cm request k4a --queue    join its queue instead if it is busy
 k4cm watch                  resume the session watcher
 k4cm release                disconnect and hand the radio back
 k4cm queue --leave          leave the queue
+k4cm request k4a -d 90m     ask for a shorter session than the default
+k4cm schedule add k4a --start "2026-10-20 19:00" --duration 2h \
+     --repeat weekly --on tue,thu --until 2026-12-31
+k4cm schedule list --mine   bookings: yours, --member CALL, or everyone's
+k4cm calendar               the booking calendar in your browser
 ```
 
 `k4cm request` stays running as the session watcher unless you pass
@@ -188,6 +193,9 @@ k4cm admin radios --power k4a --action cycle
 k4cm admin sessions                       recent and active sessions
 k4cm admin sessions --force-release 42    end someone's session
 k4cm admin audit --hours 24               read the audit trail
+k4cm admin service k4a --start "2026-10-20 09:00" --duration 4h
+                                          mark a radio "Being serviced"
+k4cm schedule add ... --override          book over members' bookings
 ```
 
 If the admin key is ever lost, `k4cm-server reset-admin` run **on the server
@@ -209,6 +217,39 @@ An extension is granted only when nobody is queued for that radio. A user who
 never answers the warning loses the radio once the ack grace expires, so radios
 are never left tied up. Separately, `[monitor] disconnect_grace_minutes`
 (default 5) reclaims a radio whose panel has been disconnected that long.
+
+## Bookings
+
+Members can book a radio ahead of time, once or on a repeating pattern: daily,
+weekly on chosen days, monthly on dates (1-28 or the last day) or on a weekday
+position (3rd Tuesday, last Friday), or yearly. Every series ends, by a count
+or an ISO end date, and nothing may be booked more than a year ahead. Times
+are entered in the member's local zone and a series keeps its local time
+across daylight-saving changes.
+
+- **Overlaps are refused.** A series is created with its clashing dates
+  skipped, and the member is told which and whose.
+- **A reservation is held for its owner** for `hold_minutes`. After that,
+  others may borrow the radio, warned that the owner can take it back; when
+  the owner asks for it, the borrower gets the usual warning and ack grace.
+- **An auto-session booking** opens the session itself at the start time.
+- **Every other session ends at the next booking**, and an extension is
+  refused if a booking, a "Being serviced" block or a queue is in its way.
+- **Admins** can mark a radio "Being serviced" or book with `--override`;
+  members' clashing dates are removed and they get a notice.
+- Owners are reminded `ending_notice_days` before a series' last date.
+
+Set in `[schedule]` in `server.toml` (absent from older files; the defaults apply):
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `hold_minutes` | 10 | How long a reservation waits for its owner before others may borrow it |
+| `ending_notice_days` | 30 | When to remind an owner their series is ending |
+
+`k4cm calendar` serves a page on 127.0.0.1 that passes requests to the server
+with the member's key; the browser never sees the key. A read-only iCalendar
+feed is designed but deferred: Google Calendar would need the server reachable
+from the internet with a publicly trusted certificate.
 
 ## Operations
 

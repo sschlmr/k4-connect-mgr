@@ -73,6 +73,30 @@ predicate, because callers (the monitor especially) act on snapshots that go sta
 awaits. Orphaned `pending` claims are failed by `abandon_stale_claims` after
 `claim_timeout`. Use `live_assignment_for_*` for "is this radio/user occupied".
 
+### Bookings
+
+`k4cm/schedule.py` (shared with the client) turns friendly repeat options into
+RRULEs and expands them **in the owner's local zone** (`bookings.tz`, naive
+`start`), then converts to UTC, so a weekly 19:00 survives DST. Each
+occurrence is keyed by the local date it would have had (`occ_date`);
+`booking_exceptions` skip or move a date under that key. Occurrences are never
+stored: `server/bookings.py` (`BookingService`) recomputes them and caches
+them against `db.bookings_rev`, which every booking write bumps.
+
+Runtime rules live in the manager: `request_assignment` refuses during a
+maintenance block or another owner's hold window, gives an owner a session to
+the booking's end, reclaims a borrowed radio for its owner (borrower's
+deadline → now, owner to the front of the queue), and caps everything else at
+the next booking. `Monitor.tick` calls `manager.enforce_bookings`, which moves
+deadlines to fit the calendar (`session_deadline`), opens auto-sessions once
+(`occurrence_state`), and promotes queues once a hold ends. A booking owner is
+not reclaimed for "no client attached" inside the hold window.
+
+`k4cm calendar` (`client/calendar.py`) is a 127.0.0.1 server passing calls
+through `ServerApi`; API calls need the per-run page token and our own Host
+header. The page is a string in `calendar_page.py` so installers need no data
+files.
+
 ### Addresses per radio
 
 `host`/`cat_port` is the LAN CAT address, used only by the server and never sent to

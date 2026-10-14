@@ -118,9 +118,9 @@ k4cm status
 ```
 
 ```
-RADIO        STATE                      UNTIL      QUEUE  REACHABLE
-k4-1         in use by W1XYZ            72m        0      yes
-k4-2         free                       -          0      yes
+RADIO        STATE                      UNTIL      QUEUE  REACHABLE  BOOKED
+k4-1         in use by W1XYZ            72m        0      yes        next: K2ABC Tue 20 Oct 19:00
+k4-2         free                       -          0      yes        now: W1AW to 21:00
 
 You have no session and are not queued.
 Your local radio: idle (not connected)
@@ -134,6 +134,8 @@ Your local radio: idle (not connected)
 - **REACHABLE**: whether the server can talk to the radio. `NO` means the radio
   is off or has a problem; tell the administrator. `?` means it hasn't been
   checked yet.
+- **BOOKED**: the booking running now, or the next one (see "Booking a radio
+  ahead" below).
 
 ## Taking a radio: `k4cm request`
 
@@ -150,14 +152,18 @@ k4cm:
 5. reports how long the session lasts, and then keeps watching it (see below).
 
 ```
-K4-1 is yours until 2026-10-10T22:15:00+00:00.
+K4-1 is yours until Sat 10 Oct 2026 18:15.
   Time allowed: 240m
 Local radio: connected to mh01.net:27201
 
 Watching your session — Ctrl-C to stop (your session keeps running).
 ```
 
-Times are shown in UTC.
+Times are shown in your computer's time zone.
+
+If someone has booked the radio for later, your session ends when their
+booking starts, and k4cm tells you so up front. If the radio is reserved by
+someone right now, see "Booking a radio ahead" below.
 
 **Leave that window open.** The watcher warns you before the session ends and
 lets you extend it. If you close it or press Ctrl-C, your session carries on;
@@ -175,6 +181,7 @@ You can have one session at a time.
 | `--queue` or `-q` | If the radio is busy, join its queue without asking |
 | `--no-watch` | Connect, then return to the prompt instead of watching. Run `k4cm watch` later |
 | `--no-connect` | Take the radio but don't drive your panel. Prints the details to enter by hand |
+| `--duration 90m` or `-d 90m` | Ask for a shorter session than the usual 4 hours (`2h`, `90m`, `1h30m`) |
 
 ## How long a session lasts
 
@@ -183,7 +190,7 @@ You can have one session at a time.
 | Session length | 4 hours |
 | Warning before the end | 15 minutes |
 | An extension adds | 1 hour |
-| Extensions allowed | only while nobody is queued for that radio |
+| Extensions allowed | only while nobody is queued for that radio, and only if no booking falls inside the extra hour |
 
 Fifteen minutes before the end, the watcher beeps and asks:
 
@@ -194,8 +201,8 @@ K4-1 session ends in 15m.
 
 - **A**: keep operating until the deadline. The session then ends and your panel
   is disconnected.
-- **E**: add an hour. Refused if someone is waiting for the radio; your answer
-  then counts as **A**.
+- **E**: add an hour. Refused if someone is waiting for the radio, or if a
+  booking starts within that hour; your answer then counts as **A**.
 - **R**: end the session now.
 
 **If you don't answer** (you've walked away, or the watcher isn't running),
@@ -226,9 +233,13 @@ When the radio you ask for is in use, k4cm says so and offers to queue you:
 
 ```
 k4cm request k4-2
-K4-2 is in use by W1XYZ until 2026-10-10T20:30:00+00:00
+K4-2 is in use by W1XYZ until Sat 10 Oct 16:30
 Join the queue for it? [Y/n]:
 ```
+
+k4cm tells you your place and the latest time the radio could reach you, if
+everyone ahead of you uses their full time. If a booking starts right when the
+radio would reach you, you aren't queued, since you would get no time on it.
 
 Each radio has its own queue. After joining, run `k4cm watch` and leave it
 running while you wait. When the radio frees up and it's your
@@ -251,6 +262,92 @@ Other queue commands:
 | `k4cm queue` | Show your place in the queue |
 | `k4cm queue --leave` | Leave the queue |
 
+## Booking a radio ahead: `k4cm schedule`
+
+You can reserve a radio for a future time, once or on a repeating pattern.
+
+```
+k4cm schedule add k4-2 --start "2026-10-20 19:00" --duration 2h \
+     --repeat monthly --on 3rd-tue --until 2026-12-31
+
+  Tue 20 Oct 2026 19:00-21:00
+  Tue 17 Nov 2026 19:00-21:00
+  Tue 15 Dec 2026 19:00-21:00
+3 date(s), last on Tue 15 Dec 2026 19:00
+Book these? [y/N]:
+```
+
+k4cm always lists the dates before booking anything. Times are in your time
+zone, and a weekly 19:00 stays 19:00 when the clocks change.
+
+**Repeating.** `--repeat` is `daily`, `weekly`, `monthly` or `yearly`, and
+`--every 2` means every second day, week, and so on. `--on` says which days:
+
+| Repeat | `--on` examples |
+|---|---|
+| weekly | `tue,thu` |
+| monthly, by date | `1,15` or `last` (dates 1 to 28, or the last day of the month) |
+| monthly, by weekday | `3rd-tue`, `2nd-sat,4th-sat`, `last-fri` |
+
+Every repeat must end: give `--count 10` or `--until 2026-12-31`. The end date
+is written as year-month-day, and it doesn't need to be one of the booked days;
+the series simply stops on or before it. Bookings can reach up to a year ahead.
+About a month before a series ends, k4cm reminds you and shows how to extend it.
+
+**Clashes.** A single booking that overlaps someone else's is refused. A series
+is booked with the clashing dates skipped, and you're told which and whose.
+
+**Modes.**
+
+- `--mode reserve` (the default): at the start time the radio is held for you.
+  You still run `k4cm request k4-2` to connect.
+- `--mode auto`: at the start time the station opens the session for you. Run
+  `k4cm request k4-2` to connect your panel to it.
+
+**When the time comes.**
+
+- For the first 10 minutes the radio is held for you, and others are refused.
+- If you haven't connected by then, someone else may borrow it, but they are
+  warned that you can take it back. If you then run `k4cm request`, they get
+  the usual warning and grace period, and the radio comes to you. Keep the
+  watcher running to accept it.
+- Your session lasts until the booking ends. You can extend it like any
+  session, if nobody is queued and nothing else is booked in that hour.
+
+**Other commands.**
+
+| Command | What it does |
+|---|---|
+| `k4cm schedule list` | Everyone's bookings for the next two weeks. `--mine`, `--member W1XYZ`, `--radio k4-2`, `--from`/`--to YYYY-MM-DD` |
+| `k4cm schedule show 12` | One booking or series, every date, and any skipped ones |
+| `k4cm schedule edit 12 --start "2026-10-20 20:00"` | Change a booking. For a series add `--scope this --date 2026-11-17` (one date), `--scope following --date ...` (that date and later), or leave the default `--scope all` |
+| `k4cm schedule edit 12 --until 2027-03-31` | Extend (or shorten) a series, keeping its pattern |
+| `k4cm schedule skip 12 --date 2026-11-17` | Cancel one date of a series |
+| `k4cm schedule remove 12` | Delete a booking. `--scope` and `--date` as for edit |
+
+Only you or an administrator can change your bookings. If an administrator
+changes or removes one, or marks the radio **Being serviced**, you'll see a
+notice the next time you use k4cm.
+
+## The calendar: `k4cm calendar`
+
+```
+k4cm calendar
+```
+
+opens the booking calendar in your web browser. Leave the terminal window open
+while you use it; Ctrl-C closes it.
+
+- **Week** shows one radio at a time; choose it from the list. **Day** shows
+  every radio side by side. Click a day or radio heading to switch.
+- **Drag** across empty time to book it. Your bookings are solid; others' are
+  pale with the owner's callsign, and "Being serviced" is striped.
+- **Click** a booking for details. You can edit or delete your own. **Drag**
+  one of yours to move it; for a series you choose this date, this and later
+  dates, or the whole series.
+- The booking form offers every repeat option and lists the dates, the last
+  one, and any that will be skipped before you book.
+
 ## Command summary
 
 | Command | What it does |
@@ -262,6 +359,8 @@ Other queue commands:
 | `k4cm release` | Disconnect and hand the radio back |
 | `k4cm queue [<radio>]` | Join a queue, or show your place in it |
 | `k4cm queue --leave` | Leave the queue |
+| `k4cm schedule ...` | Book radios ahead, and see bookings |
+| `k4cm calendar` | The booking calendar in your browser |
 | `k4cm --help`, `k4cm request --help` | Help for any command |
 
 ## Connecting by hand
