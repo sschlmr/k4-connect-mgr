@@ -16,6 +16,12 @@ the radio. All CAT traffic that changes a radio's password runs under that
 radio's lock, so a session ending and a new one starting on the same radio can
 never interleave their commands: the new password is always set after the old
 session's lockout, never scrambled by it.
+
+Bookings (bookings.py) shape every session: a request is refused while a
+radio is held for its booking owner or being serviced, and otherwise its
+deadline is capped at the start of the next booking. During someone else's
+reservation, once the hold window has passed without them, the radio may be
+borrowed — but the owner can take it back at any time.
 """
 
 from __future__ import annotations
@@ -32,15 +38,19 @@ from .. import cat
 from ..models import (
     Assignment,
     AssignmentState,
+    BookingKind,
+    Occurrence,
     Radio,
     isoformat,
     utcnow,
 )
 from . import power as power_control
 from .auth import AuthThrottle
+from .bookings import SERVICE_LABEL, BookingService, fmt_local
 from .config import ServerConfig
 from .db import ClaimConflict, Database
 from .relay import RelayManager, normalize_addr
+from .schedule import ScheduleError
 
 PASSWORD_BYTES = 12
 
@@ -74,6 +84,8 @@ class AssignmentManager:
         self.disconnected_since: dict[str, datetime] = {}
         self._radio_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self.relay = RelayManager(config, db, self.logger)
+        self.bookings = BookingService(config, db, self.logger)
+        self._last_ending_check: datetime | None = None
 
     # -- radio helpers -----------------------------------------------------
 
@@ -128,12 +140,23 @@ class AssignmentManager:
     # -- assignment --------------------------------------------------------
 
     async def request_assignment(
-        self, callsign: str, radio_ref: str, client_addr: str | None = None
+        self,
+        callsign: str,
+        radio_ref: str,
+        client_addr: str | None = None,
+        duration_minutes: int | None = None,
+        tz: str | None = None,
     ) -> dict[str, Any]:
         radio = self.radio_or_error(radio_ref)
+        now = utcnow()
+        occ = self.bookings.current(radio.id, now)
+        owner_slot = occ is not None and occ.kind is BookingKind.BOOKING and occ.owner == callsign
 
         existing = self.db.live_assignment_for_callsign(callsign)
         if existing is not None:
+            if owner_slot and existing.radio_id == radio.id and existing.state is AssignmentState.ACTIVE:
+                # Their booking already opened this session (auto mode): hand it over.
+                return self.assignment_payload(existing, include_password=True)
             raise ManagerError(
                 409,
                 f"you already have {existing.radio_id} assigned; release it first",
@@ -143,23 +166,78 @@ class AssignmentManager:
         if not radio.enabled:
             raise ManagerError(409, f"{radio.name} is disabled by the administrator")
 
+        if duration_minutes is not None and duration_minutes <= 0:
+            raise ManagerError(400, "duration must be more than zero minutes")
+
+        if occ is not None and occ.kind is BookingKind.MAINTENANCE:
+            raise ManagerError(
+                409,
+                f"{radio.name}: {SERVICE_LABEL} until {self._fmt(occ.end, tz)}",
+                radio_id=radio.id,
+                can_queue=self.db.queue_position(radio.id, callsign) is None,
+            )
+
         current = self.db.live_assignment_for_radio(radio.id)
         if current is not None:
+            if owner_slot and current.callsign != callsign:
+                raise self._reclaim_for_owner(radio, occ, current, callsign, tz)
             raise self._busy_error(radio, callsign, current)
+
+        notices: list[str] = []
+        if occ is not None and not owner_slot:
+            hold_end = occ.start + self.config.schedule.hold
+            if now < hold_end:
+                raise ManagerError(
+                    409,
+                    f"{radio.name} is reserved by {occ.owner} until {self._fmt(occ.end, tz)}. "
+                    f"It is held for them until {self._fmt(hold_end, tz)}; if they have not connected "
+                    "by then you can request it, or join the queue now.",
+                    radio_id=radio.id,
+                    reserved_by=occ.owner,
+                    free_at=isoformat(hold_end),
+                    can_queue=self.db.queue_position(radio.id, callsign) is None,
+                )
+            notices.append(
+                f"{radio.name} is reserved by {occ.owner} until {self._fmt(occ.end, tz)}. If they "
+                "connect, you'll be given the usual warning and grace period, then disconnected."
+            )
 
         offer = self.db.offer_for_radio(radio.id)
         if offer is not None and offer.callsign != callsign:
-            raise ManagerError(
-                409,
-                f"{radio.name} is being held for {offer.callsign}, who is next in its queue",
-                radio_id=radio.id,
-                can_queue=self.db.queue_position(radio.id, callsign) is None,
+            if owner_slot:
+                self.db.set_offer(offer.id, None)  # the reservation's owner comes first
+                self.db.audit(offer.callsign, "queue.offer_withdrawn", f"{radio.id}: reserved by {callsign}")
+                offer = None
+            else:
+                raise ManagerError(
+                    409,
+                    f"{radio.name} is being held for {offer.callsign}, who is next in its queue",
+                    radio_id=radio.id,
+                    can_queue=self.db.queue_position(radio.id, callsign) is None,
+                )
+
+        expires_at = occ.end if owner_slot else now + self.config.session.max_session
+        if duration_minutes is not None:
+            expires_at = min(expires_at, now + timedelta(minutes=duration_minutes))
+        if occ is not None and not owner_slot:
+            expires_at = min(expires_at, occ.end)
+        blocker = self.bookings.next_blocking(radio.id, now, callsign)
+        if blocker is not None and blocker.start < expires_at:
+            expires_at = blocker.start
+            if expires_at - now < timedelta(minutes=1):
+                raise ManagerError(
+                    409,
+                    f"{radio.name} is booked by {self._who(blocker)} from {self._fmt(blocker.start, tz)}",
+                    radio_id=radio.id,
+                )
+            notices.append(
+                f"Your session ends at {self._fmt(expires_at, tz)} because {radio.name} is booked "
+                f"by {self._who(blocker)} from then. It can't be extended past that."
             )
 
         # Phase 1: claim. The checks above give friendly errors; this insert is
         # what actually guarantees exclusivity.
         password = new_password()
-        expires_at = utcnow() + self.config.session.max_session
         try:
             claim = self.db.claim_radio(radio.id, callsign, password, expires_at, normalize_addr(client_addr))
         except ClaimConflict as e:
@@ -198,7 +276,53 @@ class AssignmentManager:
         self.db.audit(callsign, "assign", f"{radio.id} until {isoformat(expires_at)}")
         self.logger.info("assigned %s to %s until %s", radio.id, callsign, isoformat(expires_at))
         self.disconnected_since.pop(radio.id, None)
-        return self.assignment_payload(self.db.get_assignment(claim.id), include_password=True)
+        payload = self.assignment_payload(self.db.get_assignment(claim.id), include_password=True)
+        payload["notices"] = notices
+        if owner_slot:
+            payload["booking"] = self.bookings.occurrence_payload(occ)
+        return payload
+
+    def _reclaim_for_owner(
+        self, radio: Radio, occ: Occurrence, current: Assignment, owner: str, tz: str | None
+    ) -> ManagerError:
+        """The booking's owner has arrived while someone borrows the radio.
+
+        The borrower's deadline becomes now, so they get the usual warning and
+        ack grace, and the owner goes to the front of the queue to be offered
+        the radio the moment it is free.
+        """
+        if current.expires_at > utcnow():
+            self.db.set_expiry(current.id, utcnow())
+            self.db.add_notice(
+                current.callsign,
+                f"{owner} has arrived for their reservation of {radio.name}; your session is ending now.",
+            )
+            self.db.audit(owner, "booking.reclaim", f"{radio.id} from {current.callsign}")
+            self.logger.info("%s reclaiming %s from %s", owner, radio.id, current.callsign)
+        self.db.enqueue(radio.id, owner)
+        grace = self.config.session.ack_grace_minutes
+        return ManagerError(
+            409,
+            f"{radio.name} is reserved for you. {current.callsign} has been told to hand it over and "
+            f"will be disconnected within {grace} min. You're first in line: keep 'k4cm watch' "
+            "running to take it when it is offered.",
+            radio_id=radio.id,
+            reclaiming=True,
+            in_use_by=current.callsign,
+        )
+
+    def _fmt(self, when: datetime, tz: str | None) -> str:
+        """A time for a message, in the member's zone when the client said it."""
+        if tz:
+            try:
+                return fmt_local(when, tz)
+            except ScheduleError:
+                pass
+        return isoformat(when)
+
+    @staticmethod
+    def _who(occ: Occurrence) -> str:
+        return SERVICE_LABEL.lower() if occ.kind is BookingKind.MAINTENANCE else occ.owner
 
     def _busy_error(self, radio: Radio, callsign: str, current: Assignment) -> ManagerError:
         return ManagerError(
@@ -335,6 +459,14 @@ class AssignmentManager:
             )
         base = max(utcnow(), assignment.expires_at)
         new_expiry = base + self.config.session.extension
+        blocker = self.bookings.blocking_between(assignment.radio_id, base, new_expiry, callsign)
+        if blocker is not None:
+            raise ManagerError(
+                409,
+                f"extension refused: {assignment.radio_id} is booked by {self._who(blocker)} "
+                f"from {isoformat(blocker.start)}",
+                booked_from=isoformat(blocker.start),
+            )
         if not self.db.set_expiry(assignment.id, new_expiry):
             raise ManagerError(404, "you have no active assignment (it had already ended)")
         self.db.audit(callsign, "session.extend", f"{assignment.radio_id} until {isoformat(new_expiry)}")
@@ -351,15 +483,40 @@ class AssignmentManager:
 
     # -- queue -------------------------------------------------------------
 
-    def enqueue(self, callsign: str, radio_ref: str) -> dict[str, Any]:
+    def enqueue(self, callsign: str, radio_ref: str, tz: str | None = None) -> dict[str, Any]:
         radio = self.radio_or_error(radio_ref)
         if not radio.enabled:
             raise ManagerError(409, f"{radio.name} is disabled by the administrator")
         active = self.db.live_assignment_for_callsign(callsign)
         if active is not None:
             raise ManagerError(409, f"you already have {active.radio_id} assigned")
-        if self.db.live_assignment_for_radio(radio.id) is None and self.db.offer_for_radio(radio.id) is None:
+        now = utcnow()
+        occ = self.bookings.current(radio.id, now)
+        held_from_caller = occ is not None and (
+            occ.kind is BookingKind.MAINTENANCE
+            or (occ.owner != callsign and now < occ.start + self.config.schedule.hold)
+        )
+        if (
+            self.db.live_assignment_for_radio(radio.id) is None
+            and self.db.offer_for_radio(radio.id) is None
+            and not held_from_caller
+        ):
             raise ManagerError(409, f"{radio.name} is free right now — request it instead of queueing")
+
+        already = self.db.queue_position(radio.id, callsign)
+        ahead = (already - 1) if already else self.db.queue_depth(radio.id)
+        available_by = self.latest_available(radio.id, callsign, ahead, now)
+        blocker = self.bookings.blocking_between(
+            radio.id, available_by, available_by + timedelta(minutes=1), callsign
+        )
+        if blocker is not None:
+            raise ManagerError(
+                409,
+                f"not queued: by the time {radio.name} could reach you ({self._fmt(available_by, tz)}) "
+                f"it is booked by {self._who(blocker)}, so you would get no time on it",
+                radio_id=radio.id,
+            )
+
         entry = self.db.enqueue(radio.id, callsign)
         position = self.db.queue_position(radio.id, callsign)
         self.db.audit(callsign, "queue.join", f"{radio.id} position {position}")
@@ -367,7 +524,33 @@ class AssignmentManager:
             "radio": radio.public(),
             "position": position,
             "queued_at": isoformat(entry.requested_at),
+            "available_by": isoformat(available_by),
+            "detail": f"You're #{position}. Available by {self._fmt(available_by, tz)} at the latest.",
         }
+
+    def latest_available(self, radio_id: str, callsign: str, ahead: int, now: datetime | None = None) -> datetime:
+        """The latest time a member queued behind `ahead` others could get the
+        radio: the current session and reservation run to their ends, every
+        session ahead runs its full length (capped by bookings, as it would be),
+        and nobody hands back early. Sessions often end sooner."""
+        now = now or utcnow()
+        session = self.config.session
+        t = now
+        live = self.db.live_assignment_for_radio(radio_id)
+        if live is not None:
+            t = max(t, live.expires_at + session.ack_grace)
+        occ = self.bookings.current(radio_id, now)
+        if occ is not None and not (occ.owner == callsign and occ.kind is BookingKind.BOOKING):
+            t = max(t, occ.end)
+        for _ in range(ahead):
+            while (busy := self.bookings.current(radio_id, t)) is not None:
+                t = busy.end
+            end = t + session.max_session
+            blocker = self.bookings.next_blocking(radio_id, t)
+            if blocker is not None and blocker.start < end:
+                end = blocker.start
+            t = end + session.ack_grace
+        return t
 
     def leave_queue(self, callsign: str) -> dict[str, Any]:
         entry = self.db.queue_entry_for_callsign(callsign)
@@ -380,7 +563,11 @@ class AssignmentManager:
         return {"left": entry.radio_id}
 
     def promote_queue(self, radio_id: str) -> None:
-        """Hold a free radio for the next user in its queue."""
+        """Hold a free radio for the next user in its queue.
+
+        A reservation changes who is next: its owner jumps the queue, and while
+        the radio is held for them (or being serviced) nobody else is offered it.
+        """
         if self.db.live_assignment_for_radio(radio_id) is not None:
             return
         if self.db.offer_for_radio(radio_id) is not None:
@@ -388,7 +575,17 @@ class AssignmentManager:
         queue = self.db.queue_for_radio(radio_id)
         if not queue:
             return
+        now = utcnow()
+        occ = self.bookings.current(radio_id, now)
         head = queue[0]
+        if occ is not None and occ.kind is BookingKind.MAINTENANCE:
+            return
+        if occ is not None:
+            owner_entry = next((e for e in queue if e.callsign == occ.owner), None)
+            if owner_entry is not None:
+                head = owner_entry
+            elif now < occ.start + self.config.schedule.hold:
+                return
         self.db.set_offer(head.id, utcnow())
         self.db.audit(head.callsign, "queue.offer", f"{radio_id} held for {self.config.session.queue_hold_minutes} min")
         self.logger.info("offering %s to %s (head of queue)", radio_id, head.callsign)
@@ -421,6 +618,108 @@ class AssignmentManager:
         self.promote_queue(entry.radio_id)
         return {"declined": entry.radio_id}
 
+    # -- bookings at run time ------------------------------------------------
+
+    async def enforce_bookings(self, now: datetime | None = None) -> None:
+        """One monitor pass over the calendar: move session deadlines to fit
+        the bookings, open auto-sessions, and offer radios whose hold ended."""
+        now = now or utcnow()
+        self._fit_deadlines(now)
+        await self._start_auto_sessions(now)
+        for radio in self.config.radios.values():
+            self.promote_queue(radio.id)
+        if self._last_ending_check is None or now - self._last_ending_check >= timedelta(hours=1):
+            self._last_ending_check = now
+            self.bookings.send_ending_notices(now)
+
+    def session_deadline(self, assignment: Assignment, now: datetime) -> datetime:
+        """Where this session's deadline must be, given the bookings.
+
+        Someone else's booking or a maintenance block ends it at its start; a
+        borrower (granted after the hold window) may stay until the booking's
+        end. A member's own booking is never a limit: an ad-hoc session that
+        runs into it is lengthened to cover it.
+        """
+        deadline = assignment.expires_at
+        occ = self.bookings.current(assignment.radio_id, now)
+        if occ is not None:
+            if occ.kind is BookingKind.MAINTENANCE:
+                deadline = min(deadline, occ.start)
+            elif occ.owner == assignment.callsign:
+                if assignment.started_at < occ.start and deadline < occ.end:
+                    deadline = occ.end
+            else:
+                borrowed = assignment.started_at >= occ.start + self.config.schedule.hold
+                deadline = min(deadline, occ.end if borrowed else occ.start)
+        blocker = self.bookings.next_blocking(assignment.radio_id, now, assignment.callsign)
+        if blocker is not None:
+            deadline = min(deadline, blocker.start)
+        return deadline
+
+    def _fit_deadlines(self, now: datetime) -> None:
+        for assignment in self.db.active_assignments():
+            deadline = self.session_deadline(assignment, now)
+            if abs((deadline - assignment.expires_at).total_seconds()) < 1:
+                continue
+            if self.db.set_expiry(assignment.id, deadline):
+                change = "booking" if deadline > assignment.expires_at else "capped"
+                self.db.audit(
+                    "system",
+                    f"session.{change}",
+                    f"{assignment.radio_id} ({assignment.callsign}) now until {isoformat(deadline)}",
+                )
+
+    async def _start_auto_sessions(self, now: datetime) -> None:
+        hold = self.config.schedule.hold
+        for radio in self.config.radios.values():
+            occ = self.bookings.current(radio.id, now)
+            if (
+                occ is None
+                or occ.kind is not BookingKind.BOOKING
+                or occ.mode.value != "auto"
+                or now >= occ.start + hold
+                or self.db.auto_started(occ.booking_id, occ.occ_date)
+            ):
+                continue
+            live = self.db.live_assignment_for_radio(radio.id)
+            if live is not None and live.callsign == occ.owner:
+                self.db.mark_auto_started(occ.booking_id, occ.occ_date)
+                continue
+            if live is not None:
+                continue  # the previous session is still in its grace period
+            elsewhere = self.db.live_assignment_for_callsign(occ.owner)
+            if elsewhere is not None:
+                self.db.mark_auto_started(occ.booking_id, occ.occ_date)
+                self.db.add_notice(
+                    occ.owner,
+                    f"Your booking of {radio.name} started, but you are on {elsewhere.radio_id}, so no "
+                    f"session was opened. Run 'k4cm request {radio.id}' when you are ready.",
+                )
+                continue
+            try:
+                await self.request_assignment(occ.owner, radio.id)
+            except ManagerError as e:
+                self.logger.warning("auto-session for %s on %s not opened yet: %s", occ.owner, radio.id, e.message)
+                continue
+            self.db.mark_auto_started(occ.booking_id, occ.occ_date)
+            self.db.add_notice(
+                occ.owner,
+                f"Your booking of {radio.name} has started and the session is open. "
+                f"Run 'k4cm request {radio.id}' to connect your panel.",
+            )
+            self.db.audit("system", "booking.auto_start", f"{radio.id} for {occ.owner} (#{occ.booking_id} {occ.occ_date})")
+
+    def in_owner_hold(self, assignment: Assignment, now: datetime) -> bool:
+        """True while a booking owner's session is inside its hold window, when
+        no panel attached yet is not a reason to take the radio back."""
+        occ = self.bookings.current(assignment.radio_id, now)
+        return (
+            occ is not None
+            and occ.kind is BookingKind.BOOKING
+            and occ.owner == assignment.callsign
+            and now < occ.start + self.config.schedule.hold
+        )
+
     # -- views -------------------------------------------------------------
 
     def assignment_payload(self, assignment: Assignment, include_password: bool = True) -> dict[str, Any]:
@@ -440,14 +739,23 @@ class AssignmentManager:
             "warn_period_minutes": session.warn_period_minutes,
             "extension_minutes": session.extension_minutes,
         }
-        payload["can_extend"] = payload["queue_depth"] == 0
+        base = max(utcnow(), assignment.expires_at)
+        payload["can_extend"] = payload["queue_depth"] == 0 and self.bookings.blocking_between(
+            assignment.radio_id, base, base + session.extension, assignment.callsign
+        ) is None
         if include_password:
             payload["password"] = assignment.password
         return payload
 
     def session_state(self, callsign: str) -> dict[str, Any]:
         """Everything the client's session watcher needs in one poll."""
-        state: dict[str, Any] = {"callsign": callsign, "assignment": None, "offer": None, "queued": None}
+        state: dict[str, Any] = {
+            "callsign": callsign,
+            "assignment": None,
+            "offer": None,
+            "queued": None,
+            "notices": self.db.take_notices(callsign),
+        }
 
         assignment = self.db.live_assignment_for_callsign(callsign)
         if assignment is not None:
@@ -485,6 +793,12 @@ class AssignmentManager:
                 "in_use": assignment is not None,
                 "held_for": offer.callsign if offer is not None else None,
             }
+            occ = self.bookings.current(radio.id, utcnow())
+            if occ is not None:
+                row["booking"] = self.bookings.occurrence_payload(occ)
+            upcoming = self.bookings.next_blocking(radio.id, utcnow())
+            if upcoming is not None:
+                row["next_booking"] = self.bookings.occurrence_payload(upcoming)
             if assignment is not None:
                 row["user"] = assignment.callsign if include_callsigns else "in use"
                 row["since"] = isoformat(assignment.started_at)

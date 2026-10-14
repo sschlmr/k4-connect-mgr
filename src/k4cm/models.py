@@ -226,3 +226,74 @@ class AuditEntry:
     actor: str
     action: str
     detail: str
+
+
+class BookingKind(StrEnum):
+    BOOKING = "booking"            # a member's (or admin's) reservation
+    MAINTENANCE = "maintenance"    # admin-only "Being serviced" block
+
+
+class BookingMode(StrEnum):
+    RESERVE = "reserve"            # radio is held; the owner still runs `k4cm request`
+    AUTO = "auto"                  # the server opens the session at start time
+
+
+@dataclass
+class Booking:
+    """A reservation of one radio, one-off or recurring.
+
+    Times are kept in the owner's local time zone (`tz`, an IANA name) so that a
+    weekly 19:00 booking stays at 19:00 across daylight-saving changes. `start`
+    is that naive local wall-clock time; `rrule` is an RFC 5545 RRULE body (no
+    DTSTART) or None for a one-off. Expansion to UTC occurrences lives in
+    server/schedule.py.
+    """
+
+    id: int
+    radio_id: str
+    owner: str
+    kind: BookingKind
+    mode: BookingMode
+    tz: str
+    start: datetime                # naive, local to `tz`
+    duration_minutes: int
+    rrule: str | None
+    created_at: datetime
+    ending_notice_sent: bool = False
+
+
+@dataclass
+class BookingException:
+    """One date of a series changed: skipped, or moved/resized.
+
+    `occ_date` is the local date the occurrence would have had (its key).
+    `reason` is why it was skipped: owner, conflict or override.
+    """
+
+    booking_id: int
+    occ_date: str                  # ISO local date, e.g. "2026-11-24"
+    action: str                    # "skip" | "move"
+    reason: str = ""
+    new_start: datetime | None = None   # naive local, for "move"
+    new_duration_minutes: int | None = None
+    blocked_by: str = ""           # owner of the booking that caused a conflict skip
+
+
+@dataclass
+class Occurrence:
+    """One concrete time slot of a booking, in UTC."""
+
+    booking_id: int
+    occ_date: str
+    radio_id: str
+    owner: str
+    kind: BookingKind
+    mode: BookingMode
+    start: datetime
+    end: datetime
+
+    def overlaps(self, start: datetime, end: datetime) -> bool:
+        return self.start < end and start < self.end
+
+    def active_at(self, when: datetime) -> bool:
+        return self.start <= when < self.end

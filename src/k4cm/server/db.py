@@ -1,4 +1,4 @@
-"""SQLite storage: users, assignments, per-radio wait queues, audit trail.
+"""SQLite storage: users, assignments, per-radio wait queues, bookings, audit trail.
 
 Radios are not stored here — they come from the server config file.
 
@@ -25,6 +25,10 @@ from ..models import (
     Assignment,
     AssignmentState,
     AuditEntry,
+    Booking,
+    BookingException,
+    BookingKind,
+    BookingMode,
     QueueEntry,
     User,
     isoformat,
@@ -78,6 +82,48 @@ CREATE TABLE IF NOT EXISTS audit (
     detail    TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_audit_time ON audit(timestamp);
+
+CREATE TABLE IF NOT EXISTS bookings (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    radio_id           TEXT NOT NULL,
+    owner              TEXT NOT NULL,
+    kind               TEXT NOT NULL,
+    mode               TEXT NOT NULL,
+    tz                 TEXT NOT NULL,
+    start              TEXT NOT NULL,
+    duration_minutes   INTEGER NOT NULL,
+    rrule              TEXT,
+    created_at         TEXT NOT NULL,
+    ending_notice_sent INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_bookings_radio ON bookings(radio_id);
+
+CREATE TABLE IF NOT EXISTS booking_exceptions (
+    booking_id           INTEGER NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
+    occ_date             TEXT NOT NULL,
+    action               TEXT NOT NULL,
+    reason               TEXT NOT NULL DEFAULT '',
+    new_start            TEXT,
+    new_duration_minutes INTEGER,
+    blocked_by           TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (booking_id, occ_date)
+);
+
+CREATE TABLE IF NOT EXISTS occurrence_state (
+    booking_id      INTEGER NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
+    occ_date        TEXT NOT NULL,
+    auto_started_at TEXT,
+    PRIMARY KEY (booking_id, occ_date)
+);
+
+CREATE TABLE IF NOT EXISTS notices (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    callsign   TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    message    TEXT NOT NULL,
+    read_at    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_notices_callsign ON notices(callsign, read_at);
 """
 
 # Columns added after the first release: (table, column, declaration). Existing
@@ -122,6 +168,43 @@ def _to_queue_entry(row: sqlite3.Row) -> QueueEntry:
     )
 
 
+def _local(value: str | None) -> datetime | None:
+    """Booking times are naive local wall-clock times, stored without offset."""
+    return datetime.fromisoformat(value) if value else None
+
+
+def _local_text(value: datetime | None) -> str | None:
+    return value.replace(tzinfo=None).isoformat(timespec="minutes") if value else None
+
+
+def _to_booking(row: sqlite3.Row) -> Booking:
+    return Booking(
+        id=row["id"],
+        radio_id=row["radio_id"],
+        owner=row["owner"],
+        kind=BookingKind(row["kind"]),
+        mode=BookingMode(row["mode"]),
+        tz=row["tz"],
+        start=_local(row["start"]),
+        duration_minutes=row["duration_minutes"],
+        rrule=row["rrule"],
+        created_at=parse_dt(row["created_at"]),
+        ending_notice_sent=bool(row["ending_notice_sent"]),
+    )
+
+
+def _to_exception(row: sqlite3.Row) -> BookingException:
+    return BookingException(
+        booking_id=row["booking_id"],
+        occ_date=row["occ_date"],
+        action=row["action"],
+        reason=row["reason"],
+        new_start=_local(row["new_start"]),
+        new_duration_minutes=row["new_duration_minutes"],
+        blocked_by=row["blocked_by"],
+    )
+
+
 _LIVE = tuple(s.value for s in LIVE_STATES)
 
 
@@ -137,6 +220,8 @@ class Database:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        # Bumped on every booking write, so cached schedules know they are stale.
+        self.bookings_rev = 0
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -467,6 +552,181 @@ class Database:
                 (radio_id,),
             ).fetchone()
         return _to_queue_entry(row) if row else None
+
+    # -- bookings ----------------------------------------------------------
+
+    def create_booking(self, booking: Booking, exceptions: list[BookingException] = ()) -> Booking:
+        """Insert a booking and its initial exceptions (dates skipped for
+        conflicts) in one transaction. Returns it with its new id."""
+        with self._lock:
+            try:
+                cur = self._conn.execute(
+                    "INSERT INTO bookings (radio_id, owner, kind, mode, tz, start, duration_minutes,"
+                    " rrule, created_at, ending_notice_sent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        booking.radio_id,
+                        booking.owner,
+                        booking.kind.value,
+                        booking.mode.value,
+                        booking.tz,
+                        _local_text(booking.start),
+                        booking.duration_minutes,
+                        booking.rrule,
+                        isoformat(booking.created_at),
+                        int(booking.ending_notice_sent),
+                    ),
+                )
+                booking_id = int(cur.lastrowid)
+                for exc in exceptions:
+                    self._put_exception(booking_id, exc)
+            except sqlite3.Error:
+                self._conn.rollback()
+                raise
+            self.bookings_rev += 1
+            self._conn.commit()
+        booking.id = booking_id
+        return booking
+
+    def update_booking(self, booking: Booking) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE bookings SET radio_id = ?, mode = ?, tz = ?, start = ?, duration_minutes = ?,"
+                " rrule = ?, ending_notice_sent = ? WHERE id = ?",
+                (
+                    booking.radio_id,
+                    booking.mode.value,
+                    booking.tz,
+                    _local_text(booking.start),
+                    booking.duration_minutes,
+                    booking.rrule,
+                    int(booking.ending_notice_sent),
+                    booking.id,
+                ),
+            )
+            self.bookings_rev += 1
+            self._conn.commit()
+        return cur.rowcount == 1
+
+    def get_booking(self, booking_id: int) -> Booking | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM bookings WHERE id = ?", (booking_id,)).fetchone()
+        return _to_booking(row) if row else None
+
+    def list_bookings(self, radio_id: str | None = None, owner: str | None = None) -> list[Booking]:
+        clauses, params = [], []
+        if radio_id:
+            clauses.append("radio_id = ?")
+            params.append(radio_id)
+        if owner:
+            clauses.append("owner = ?")
+            params.append(owner.strip().upper())
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._lock:
+            rows = self._conn.execute(f"SELECT * FROM bookings{where} ORDER BY id", params).fetchall()
+        return [_to_booking(r) for r in rows]
+
+    def delete_booking(self, booking_id: int) -> bool:
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM bookings WHERE id = ?", (booking_id,))
+            self.bookings_rev += 1
+            self._conn.commit()
+        return cur.rowcount == 1
+
+    def _put_exception(self, booking_id: int, exc: BookingException) -> None:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO booking_exceptions (booking_id, occ_date, action, reason,"
+            " new_start, new_duration_minutes, blocked_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                booking_id,
+                exc.occ_date,
+                exc.action,
+                exc.reason,
+                _local_text(exc.new_start),
+                exc.new_duration_minutes,
+                exc.blocked_by,
+            ),
+        )
+
+    def put_exception(self, exc: BookingException) -> None:
+        with self._lock:
+            self._put_exception(exc.booking_id, exc)
+            self.bookings_rev += 1
+            self._conn.commit()
+
+    def delete_exceptions(
+        self, booking_id: int, reason: str | None = None, from_date: str | None = None
+    ) -> None:
+        clauses, params = ["booking_id = ?"], [booking_id]
+        if reason is not None:
+            clauses.append("reason = ?")
+            params.append(reason)
+        if from_date is not None:
+            clauses.append("occ_date >= ?")
+            params.append(from_date)
+        with self._lock:
+            self._conn.execute(f"DELETE FROM booking_exceptions WHERE {' AND '.join(clauses)}", params)
+            self.bookings_rev += 1
+            self._conn.commit()
+
+    def exceptions_for(self, booking_id: int) -> list[BookingException]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM booking_exceptions WHERE booking_id = ? ORDER BY occ_date", (booking_id,)
+            ).fetchall()
+        return [_to_exception(r) for r in rows]
+
+    def all_exceptions(self) -> dict[int, list[BookingException]]:
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM booking_exceptions ORDER BY occ_date").fetchall()
+        result: dict[int, list[BookingException]] = {}
+        for row in rows:
+            result.setdefault(row["booking_id"], []).append(_to_exception(row))
+        return result
+
+    def mark_auto_started(self, booking_id: int, occ_date: str) -> bool:
+        """Record that an auto-session was opened for this occurrence. False if
+        one already was, so the monitor never opens it twice."""
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO occurrence_state (booking_id, occ_date, auto_started_at)"
+                " VALUES (?, ?, ?)",
+                (booking_id, occ_date, isoformat(utcnow())),
+            )
+            self._conn.commit()
+        return cur.rowcount == 1
+
+    def auto_started(self, booking_id: int, occ_date: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM occurrence_state WHERE booking_id = ? AND occ_date = ?",
+                (booking_id, occ_date),
+            ).fetchone()
+        return row is not None
+
+    # -- notices -----------------------------------------------------------
+
+    def add_notice(self, callsign: str, message: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO notices (callsign, created_at, message) VALUES (?, ?, ?)",
+                (callsign.strip().upper(), isoformat(utcnow()), message),
+            )
+            self._conn.commit()
+
+    def take_notices(self, callsign: str) -> list[dict]:
+        """Unread notices for a member, marked read as they are returned."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM notices WHERE callsign = ? AND read_at IS NULL ORDER BY id",
+                (callsign.strip().upper(),),
+            ).fetchall()
+            if rows:
+                self._conn.execute(
+                    "UPDATE notices SET read_at = ? WHERE callsign = ? AND read_at IS NULL",
+                    (isoformat(utcnow()), callsign.strip().upper()),
+                )
+                self._conn.commit()
+        return [{"created_at": r["created_at"], "message": r["message"]} for r in rows]
 
     # -- audit -------------------------------------------------------------
 

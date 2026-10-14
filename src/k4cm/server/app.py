@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from .. import __version__
-from ..models import AssignmentState, User, isoformat, utcnow
+from ..models import AssignmentState, User, isoformat, parse_dt, utcnow
 from .auth import (
     client_address,
     generate_api_key,
@@ -28,14 +28,52 @@ from .auth import (
     require_user,
 )
 from .backup import BackupScheduler
+from .bookings import BookingChanges, BookingError, BookingInput
 from .config import ServerConfig
 from .db import Database
 from .manager import AssignmentManager, ManagerError
 from .monitor import Monitor
+from .schedule import RepeatSpec
 
 
 class RadioRequest(BaseModel):
     radio: str = Field(..., description="id or name of the specific K4 being requested")
+    duration_minutes: int | None = Field(None, description="ask for a session shorter than the default")
+    tz: str | None = Field(None, description="the member's IANA time zone, for times in messages")
+
+
+class RepeatBody(BaseModel):
+    freq: str = Field(..., description="daily, weekly, monthly or yearly")
+    every: int = 1
+    on: list[str] = Field(default_factory=list, description="tue,thu | 1,15,last | 3rd-tue,last-fri")
+    count: int | None = None
+    until: str | None = Field(None, description="ISO date, inclusive")
+
+    def spec(self) -> RepeatSpec:
+        return RepeatSpec(self.freq, self.every, list(self.on), self.count, self.until)
+
+
+class BookingBody(BaseModel):
+    radio: str
+    start: str = Field(..., description="local wall-clock time, e.g. 2026-10-20 19:00")
+    duration: str = Field(..., description="2h, 90m, 1h30m")
+    tz: str = Field(..., description="IANA time zone the start is in")
+    mode: str = "reserve"
+    kind: str = "booking"
+    repeat: RepeatBody | None = None
+    override: bool = False
+
+
+class BookingEditBody(BaseModel):
+    scope: str = "all"
+    date: str | None = Field(None, description="the date (YYYY-MM-DD) a 'this' or 'following' edit applies to")
+    start: str | None = None
+    duration: str | None = None
+    mode: str | None = None
+    radio: str | None = None
+    repeat: RepeatBody | None = None
+    count: int | None = None
+    until: str | None = None
 
 
 class NewUserRequest(BaseModel):
@@ -90,6 +128,10 @@ def create_app(
     async def _manager_error(request: Request, exc: ManagerError) -> JSONResponse:
         return JSONResponse(status_code=exc.status_code, content=exc.payload())
 
+    @app.exception_handler(BookingError)
+    async def _booking_error(request: Request, exc: BookingError) -> JSONResponse:
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.message, **exc.extra})
+
     # -- unauthenticated ---------------------------------------------------
 
     @app.get("/health")
@@ -100,7 +142,9 @@ def create_app(
 
     @app.post("/assignments", status_code=status.HTTP_201_CREATED)
     async def create_assignment(body: RadioRequest, request: Request, user: User = Depends(require_user)):
-        return await manager.request_assignment(user.callsign, body.radio, client_address(request))
+        return await manager.request_assignment(
+            user.callsign, body.radio, client_address(request), body.duration_minutes, body.tz
+        )
 
     @app.get("/assignments/current")
     async def current_assignment(request: Request, user: User = Depends(require_user)):
@@ -134,7 +178,7 @@ def create_app(
 
     @app.post("/queue", status_code=status.HTTP_201_CREATED)
     async def join_queue(body: RadioRequest, user: User = Depends(require_user)):
-        return manager.enqueue(user.callsign, body.radio)
+        return manager.enqueue(user.callsign, body.radio, body.tz)
 
     @app.get("/queue/position")
     async def queue_position(user: User = Depends(require_user)):
@@ -151,6 +195,75 @@ def create_app(
     @app.post("/queue/decline")
     async def decline_offer(user: User = Depends(require_user)):
         return manager.decline_offer(user.callsign)
+
+    # -- bookings ----------------------------------------------------------
+
+    @app.get("/bookings")
+    async def list_bookings(
+        start: str | None = None,
+        end: str | None = None,
+        radio: str | None = None,
+        owner: str | None = None,
+        user: User = Depends(require_user),
+    ):
+        """Occurrences overlapping [start, end) (UTC ISO; default the next 14 days)."""
+        begin = parse_dt(start) if start else utcnow()
+        finish = parse_dt(end) if end else begin + timedelta(days=14)
+        return {
+            "start": isoformat(begin),
+            "end": isoformat(finish),
+            "occurrences": manager.bookings.list_occurrences(begin, finish, radio, owner),
+        }
+
+    @app.get("/bookings/series")
+    async def list_series(radio: str | None = None, owner: str | None = None, user: User = Depends(require_user)):
+        return manager.bookings.list_series(owner, radio)
+
+    @app.post("/bookings", status_code=status.HTTP_201_CREATED)
+    async def create_booking(body: BookingBody, dry_run: bool = False, user: User = Depends(require_user)):
+        return manager.bookings.create(
+            user,
+            BookingInput(
+                radio=body.radio,
+                start=body.start,
+                duration=body.duration,
+                tz=body.tz,
+                mode=body.mode,
+                kind=body.kind,
+                repeat=body.repeat.spec() if body.repeat else None,
+                override=body.override,
+            ),
+            dry_run=dry_run,
+        )
+
+    @app.get("/bookings/{booking_id}")
+    async def get_booking(booking_id: int, user: User = Depends(require_user)):
+        return manager.bookings.get(booking_id)
+
+    @app.patch("/bookings/{booking_id}")
+    async def edit_booking(
+        booking_id: int, body: BookingEditBody, dry_run: bool = False, user: User = Depends(require_user)
+    ):
+        changes = BookingChanges(
+            start=body.start,
+            duration=body.duration,
+            mode=body.mode,
+            radio=body.radio,
+            repeat=body.repeat.spec() if body.repeat else None,
+            count=body.count,
+            until=body.until,
+        )
+        return manager.bookings.edit(user, booking_id, changes, body.scope, body.date, dry_run)
+
+    @app.delete("/bookings/{booking_id}")
+    async def delete_booking(
+        booking_id: int, scope: str = "all", date: str | None = None, user: User = Depends(require_user)
+    ):
+        return manager.bookings.remove(user, booking_id, scope, date)
+
+    @app.get("/notices")
+    async def notices(user: User = Depends(require_user)):
+        return {"notices": db.take_notices(user.callsign)}
 
     # -- admin: users ------------------------------------------------------
 

@@ -45,6 +45,13 @@ extension_minutes = 60
 # How long a freed radio is held for the next user in its queue.
 queue_hold_minutes = 10
 
+[schedule]
+# How long a reservation is held for its owner before others may borrow the
+# radio (they are warned the owner can take it back).
+hold_minutes = 10
+# How many days before a series' last date its owner is offered an extension.
+ending_notice_days = 30
+
 [monitor]
 poll_interval_seconds = 30
 # How long an assigned radio may sit with no client attached before reclaiming.
@@ -159,6 +166,20 @@ class SessionSettings:
 
 
 @dataclass
+class ScheduleSettings:
+    hold_minutes: int = 10
+    ending_notice_days: int = 30
+
+    @property
+    def hold(self) -> timedelta:
+        return timedelta(minutes=self.hold_minutes)
+
+    @property
+    def ending_notice(self) -> timedelta:
+        return timedelta(days=self.ending_notice_days)
+
+
+@dataclass
 class MonitorSettings:
     poll_interval_seconds: float = 30.0
     disconnect_grace_minutes: int = 5
@@ -197,6 +218,7 @@ class ServerConfig:
     path: Path
     server: ServerSettings = field(default_factory=ServerSettings)
     session: SessionSettings = field(default_factory=SessionSettings)
+    schedule: ScheduleSettings = field(default_factory=ScheduleSettings)
     monitor: MonitorSettings = field(default_factory=MonitorSettings)
     relay: RelaySettings = field(default_factory=RelaySettings)
     storage: StorageSettings = field(default_factory=StorageSettings)
@@ -284,6 +306,7 @@ def load_config(path: Path | None = None, data_dir: Path | None = None) -> Serve
         path=path,
         server=_section(raw, "server", ServerSettings),
         session=_section(raw, "session", SessionSettings),
+        schedule=_section(raw, "schedule", ScheduleSettings),
         monitor=_section(raw, "monitor", MonitorSettings),
         relay=_section(raw, "relay", RelaySettings),
         storage=_section(raw, "storage", StorageSettings),

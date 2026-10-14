@@ -1,4 +1,5 @@
-"""Background monitor: disconnect detection, deadline enforcement, offer expiry.
+"""Background monitor: disconnect detection, deadline enforcement, offer expiry,
+and the calendar (bookings capping deadlines, auto-sessions, hold windows).
 
 Decisions here are made from a snapshot that can go stale while the monitor
 awaits radios, so each ending passes `still_due` and the manager re-checks it
@@ -57,6 +58,7 @@ class Monitor:
         now = now or utcnow()
         self.manager.expire_offers()
         await self.manager.abandon_stale_claims(now)
+        await self.manager.enforce_bookings(now)
         await self._enforce_sessions(now)
         await self._probe_idle_radios()
 
@@ -115,6 +117,8 @@ class Monitor:
             return
 
         since = self.manager.disconnected_since.setdefault(radio.id, now)
+        if self.manager.in_owner_hold(assignment, now):
+            return  # a booking owner has the whole hold window to connect
         idle = now - since
         if idle >= self.config.monitor.disconnect_grace:
             await self.manager.end_assignment(
