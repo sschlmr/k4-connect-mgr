@@ -34,9 +34,7 @@ from ..models import (
     isoformat,
     utcnow,
 )
-from .config import ServerConfig
-from .db import Database
-from .schedule import (
+from ..schedule import (
     RepeatSpec,
     ScheduleError,
     build_rrule,
@@ -48,6 +46,8 @@ from .schedule import (
     parse_local_start,
     zone,
 )
+from .config import ServerConfig
+from .db import Database
 
 SCOPES = ("this", "following", "all")
 SERVICE_LABEL = "Being serviced"

@@ -44,13 +44,13 @@ from ..models import (
     isoformat,
     utcnow,
 )
+from ..schedule import ScheduleError
 from . import power as power_control
 from .auth import AuthThrottle
 from .bookings import SERVICE_LABEL, BookingService, fmt_local
 from .config import ServerConfig
 from .db import ClaimConflict, Database
 from .relay import RelayManager, normalize_addr
-from .schedule import ScheduleError
 
 PASSWORD_BYTES = 12
 
@@ -181,7 +181,7 @@ class AssignmentManager:
         if current is not None:
             if owner_slot and current.callsign != callsign:
                 raise self._reclaim_for_owner(radio, occ, current, callsign, tz)
-            raise self._busy_error(radio, callsign, current)
+            raise self._busy_error(radio, callsign, current, tz)
 
         notices: list[str] = []
         if occ is not None and not owner_slot:
@@ -243,7 +243,7 @@ class AssignmentManager:
         except ClaimConflict as e:
             winner = self.db.live_assignment_for_radio(radio.id)
             if winner is not None and winner.callsign != callsign:
-                raise self._busy_error(radio, callsign, winner) from e
+                raise self._busy_error(radio, callsign, winner, tz) from e
             raise ManagerError(409, "you already have a session starting; wait for it to finish") from e
 
         # Phase 2: configure the radio, then promote the claim.
@@ -324,10 +324,10 @@ class AssignmentManager:
     def _who(occ: Occurrence) -> str:
         return SERVICE_LABEL.lower() if occ.kind is BookingKind.MAINTENANCE else occ.owner
 
-    def _busy_error(self, radio: Radio, callsign: str, current: Assignment) -> ManagerError:
+    def _busy_error(self, radio: Radio, callsign: str, current: Assignment, tz: str | None = None) -> ManagerError:
         return ManagerError(
             409,
-            f"{radio.name} is in use by {current.callsign} until {isoformat(current.expires_at)}",
+            f"{radio.name} is in use by {current.callsign} until {self._fmt(current.expires_at, tz)}",
             radio_id=radio.id,
             in_use_by=current.callsign,
             expires_at=isoformat(current.expires_at),

@@ -7,9 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from k4cm.models import AssignmentState, Booking, BookingKind, BookingMode, utcnow
-from k4cm.server.bookings import BookingChanges, BookingError, BookingInput
-from k4cm.server.manager import ManagerError
-from k4cm.server.schedule import (
+from k4cm.schedule import (
     RepeatSpec,
     ScheduleError,
     build_rrule,
@@ -18,9 +16,9 @@ from k4cm.server.schedule import (
     parse_duration,
     parse_until,
 )
-from k4cm.server.schedule import (
-    parse_local_start as wall,
-)
+from k4cm.schedule import parse_local_start as wall
+from k4cm.server.bookings import BookingChanges, BookingError, BookingInput
+from k4cm.server.manager import ManagerError
 
 
 def at(minutes: int) -> datetime:

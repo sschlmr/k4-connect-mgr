@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dateutil.rrule import rrulestr
 
-from ..models import Booking, BookingException, Occurrence
+from .models import Booking, BookingException, Occurrence
 
 HORIZON = timedelta(days=365)
 

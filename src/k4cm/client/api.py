@@ -86,8 +86,12 @@ class ServerApi:
     def health(self) -> dict:
         return self._request("GET", "/health")
 
-    def request_assignment(self, radio: str) -> dict:
-        return self._request("POST", "/assignments", json={"radio": radio})
+    def request_assignment(self, radio: str, duration_minutes: int | None = None) -> dict:
+        return self._request(
+            "POST",
+            "/assignments",
+            json={"radio": radio, "duration_minutes": duration_minutes, "tz": self.config.local_timezone},
+        )
 
     def session_state(self) -> dict:
         return self._request("GET", "/assignments/current")
@@ -108,7 +112,7 @@ class ServerApi:
         return self._request("GET", "/status")
 
     def join_queue(self, radio: str) -> dict:
-        return self._request("POST", "/queue", json={"radio": radio})
+        return self._request("POST", "/queue", json={"radio": radio, "tz": self.config.local_timezone})
 
     def leave_queue(self) -> dict:
         return self._request("DELETE", "/queue")
@@ -118,6 +122,41 @@ class ServerApi:
 
     def decline_offer(self) -> dict:
         return self._request("POST", "/queue/decline")
+
+    # -- bookings ----------------------------------------------------------
+
+    def bookings(
+        self,
+        start: str | None = None,
+        end: str | None = None,
+        radio: str | None = None,
+        owner: str | None = None,
+    ) -> dict:
+        params = {k: v for k, v in (("start", start), ("end", end), ("radio", radio), ("owner", owner)) if v}
+        return self._request("GET", "/bookings", params=params)
+
+    def booking_series(self, radio: str | None = None, owner: str | None = None) -> list:
+        params = {k: v for k, v in (("radio", radio), ("owner", owner)) if v}
+        return self._request("GET", "/bookings/series", params=params)
+
+    def create_booking(self, body: dict, dry_run: bool = False) -> dict:
+        body = {"tz": self.config.local_timezone, **body}
+        return self._request("POST", "/bookings", json=body, params={"dry_run": str(dry_run).lower()})
+
+    def get_booking(self, booking_id: int) -> dict:
+        return self._request("GET", f"/bookings/{booking_id}")
+
+    def edit_booking(self, booking_id: int, body: dict, dry_run: bool = False) -> dict:
+        return self._request(
+            "PATCH", f"/bookings/{booking_id}", json=body, params={"dry_run": str(dry_run).lower()}
+        )
+
+    def delete_booking(self, booking_id: int, scope: str = "all", date: str | None = None) -> dict:
+        params = {"scope": scope, **({"date": date} if date else {})}
+        return self._request("DELETE", f"/bookings/{booking_id}", params=params)
+
+    def notices(self) -> list:
+        return self._request("GET", "/notices")["notices"]
 
     # -- admin calls -------------------------------------------------------
 

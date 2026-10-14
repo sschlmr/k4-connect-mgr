@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from .. import __version__
 from ..models import AssignmentState, User, isoformat, parse_dt, utcnow
+from ..schedule import RepeatSpec
 from .auth import (
     client_address,
     generate_api_key,
@@ -33,7 +34,6 @@ from .config import ServerConfig
 from .db import Database
 from .manager import AssignmentManager, ManagerError
 from .monitor import Monitor
-from .schedule import RepeatSpec
 
 
 class RadioRequest(BaseModel):

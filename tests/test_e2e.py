@@ -133,7 +133,7 @@ async def test_busy_radio_offers_the_queue(live):
 
     assert result.exit_code == 1
     assert "in use by W1AW" in result.output
-    assert "Queued for K4 Alpha at position 1" in result.output
+    assert "Queued for K4 Alpha. You're #1." in result.output
     assert fixture.db.queue_depth("k4a") == 1
 
 

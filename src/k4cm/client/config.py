@@ -32,7 +32,21 @@ class ClientConfig:
     api_key: str = ""
     radio_host: str = ""
     radio_cat_port: int = DEFAULT_CAT_PORT
+    timezone: str = ""                  # IANA name; empty means this computer's zone
     path: Path | None = None
+
+    @property
+    def local_timezone(self) -> str:
+        """The zone bookings are entered in: the configured one, else this
+        computer's, else UTC."""
+        if self.timezone:
+            return self.timezone
+        try:
+            import tzlocal
+
+            return tzlocal.get_localzone_name() or "UTC"
+        except (LookupError, OSError, ValueError):  # an odd system zone must not break the CLI
+            return "UTC"
 
     @property
     def cert_path(self) -> Path:
@@ -85,12 +99,14 @@ def load_config(path: Path | None = None) -> ClientConfig:
         raw = tomllib.load(fh)
     server = raw.get("server", {})
     radio = raw.get("radio", {})
+    schedule = raw.get("schedule", {})
     return ClientConfig(
         server_url=str(server.get("url", "")),
         callsign=str(server.get("callsign", "")),
         api_key=str(server.get("api_key", "")),
         radio_host=str(radio.get("host", "")),
         radio_cat_port=int(radio.get("cat_port", DEFAULT_CAT_PORT)),
+        timezone=str(schedule.get("timezone", "")),
         path=path,
     )
 
@@ -115,6 +131,11 @@ def save_config(config: ClientConfig, path: Path | None = None) -> Path:
         f"host = {_quote(config.radio_host)}\n"
         f"cat_port = {config.radio_cat_port}\n"
     )
+    if config.timezone:
+        content += (
+            "\n# Time zone bookings are entered in (IANA name). Remove to follow this computer.\n"
+            f"[schedule]\ntimezone = {_quote(config.timezone)}\n"
+        )
     path.write_text(content, encoding="utf-8")
     try:
         path.chmod(0o600)  # the API key lives here

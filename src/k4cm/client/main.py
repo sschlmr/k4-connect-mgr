@@ -5,6 +5,8 @@
     k4cm watch               resume the session watcher (timeout negotiation)
     k4cm release             disconnect and hand the radio back
     k4cm status              what every K4 at the site is doing
+    k4cm schedule ...        book radios ahead of time; see who has booked what
+    k4cm calendar            the booking calendar in your browser
     k4cm admin ...           administrative commands (admin key required)
 """
 
@@ -17,7 +19,9 @@ from typing import Any
 
 import typer
 
+from ..schedule import ScheduleError, parse_duration
 from . import radio as local_radio
+from . import schedule_cli
 from .api import ApiError, ServerApi
 from .config import (
     ClientConfig,
@@ -33,6 +37,8 @@ from .config import (
 app = typer.Typer(help="K4 Connect Manager — request and manage remote K4 sessions", no_args_is_help=True)
 admin_app = typer.Typer(help="Administrative commands (require an admin API key)", no_args_is_help=True)
 app.add_typer(admin_app, name="admin")
+app.add_typer(schedule_cli.schedule_app, name="schedule")
+admin_app.command("service")(schedule_cli.service)
 
 POLL_SECONDS = 30
 
@@ -176,13 +182,29 @@ def request(
         False, "--no-connect", help="Get the assignment but do not drive the local radio"
     ),
     queue: bool = typer.Option(False, "--queue", "-q", help="Join the queue if the radio is busy"),
+    duration: str = typer.Option(
+        None, "--duration", "-d", help="Ask for a shorter session than the default, e.g. 90m or 1h30m"
+    ),
 ) -> None:
     """Request a specific K4 and connect your panel to it."""
     api, cfg = get_api()
+    minutes_wanted = None
+    if duration:
+        try:
+            minutes_wanted = parse_duration(duration)
+        except ScheduleError as e:
+            err(str(e))
+            raise typer.Exit(code=2)
 
     try:
-        assignment = api.request_assignment(radio)
+        assignment = api.request_assignment(radio, minutes_wanted)
     except ApiError as e:
+        if e.status_code == 409 and e.payload.get("reclaiming"):
+            warn(str(e))
+            if no_watch:
+                raise typer.Exit(code=1)
+            _watch_loop(api, cfg)
+            return
         if e.status_code == 409 and e.payload.get("can_queue"):
             err(str(e))
             _offer_queue(api, radio, queue)
@@ -190,6 +212,8 @@ def request(
         fail(e)
 
     _report_assignment(assignment)
+    for notice in assignment.get("notices") or []:
+        warn(notice)
 
     if no_connect or not cfg.has_local_radio:
         if not cfg.has_local_radio:
@@ -241,13 +265,27 @@ def _offer_queue(api: ServerApi, radio: str, auto_queue: bool) -> None:
     except ApiError as e:
         err(str(e))
         return
-    ok(f"Queued for {result['radio']['name']} at position {result['position']}.")
+    ok(f"Queued for {result['radio']['name']}. {_queue_detail(result)}")
     typer.echo("Run 'k4cm watch' to be told when it is offered to you.")
+
+
+def _queue_detail(result: dict[str, Any]) -> str:
+    if result.get("available_by"):
+        cfg = load_config()
+        return (
+            f"You're #{result['position']}. Available by "
+            f"{schedule_cli.fmt_when(result['available_by'], cfg, with_year=False)} at the latest."
+        )
+    return f"Position {result['position']}."
 
 
 def _report_assignment(assignment: dict[str, Any]) -> None:
     info = assignment["radio"]
-    ok(f"\n{info['name']} is yours until {assignment['expires_at']}.")
+    try:
+        until = schedule_cli.fmt_when(assignment["expires_at"], load_config())
+    except ConfigError:
+        until = assignment["expires_at"]
+    ok(f"\n{info['name']} is yours until {until}.")
     if info.get("description"):
         typer.echo(f"  {info['description']}")
     typer.echo(f"  Time allowed: {minutes(assignment.get('seconds_remaining'))}")
@@ -296,7 +334,8 @@ def status() -> None:
     except ApiError as e:
         fail(e)
 
-    typer.echo(f"{'RADIO':<12} {'STATE':<26} {'UNTIL':<10} {'QUEUE':<6} REACHABLE")
+    schedule_cli.print_notices(state.get("notices"))
+    typer.echo(f"{'RADIO':<12} {'STATE':<26} {'UNTIL':<10} {'QUEUE':<6} {'REACHABLE':<10} BOOKED")
     for row in payload["radios"]:
         if row["in_use"]:
             state_text = f"in use by {row['user']}"
@@ -312,13 +351,25 @@ def status() -> None:
             until = "-"
         reachable = {True: "yes", False: "NO", None: "?"}[row.get("reachable")]
         typer.echo(
-            f"{row['id']:<12} {state_text:<26} {until:<10} {row['queue_depth']:<6} {reachable}"
+            f"{row['id']:<12} {state_text:<26} {until:<10} {row['queue_depth']:<6} {reachable:<10} "
+            f"{_booking_note(row, cfg)}"
         )
 
     typer.echo("")
     _print_session_summary(state)
     if cfg.has_local_radio:
         typer.echo(f"Your local radio: {local_radio.local_state(cfg)}")
+
+
+def _booking_note(row: dict[str, Any], cfg: ClientConfig) -> str:
+    """'now: W1AW to 21:00' or 'next: Being serviced Tue 20 Oct 09:00'."""
+    current, upcoming = row.get("booking"), row.get("next_booking")
+    if current:
+        end = schedule_cli.local(current["end"], cfg)
+        return f"now: {current['label']} to {end:%H:%M}"
+    if upcoming:
+        return f"next: {upcoming['label']} {schedule_cli.fmt_when(upcoming['start'], cfg, with_year=False)}"
+    return "-"
 
 
 def _print_session_summary(state: dict[str, Any]) -> None:
@@ -365,6 +416,7 @@ def _watch_loop(api: ServerApi, cfg: ClientConfig) -> None:
                 time.sleep(POLL_SECONDS)
                 continue
 
+            schedule_cli.print_notices(state.get("notices"))
             assignment, offer, queued = state.get("assignment"), state.get("offer"), state.get("queued")
 
             if assignment:
@@ -512,7 +564,7 @@ def queue_command(
             ok(f"Left the queue for {result['left']}.")
         elif radio:
             result = api.join_queue(radio)
-            ok(f"Queued for {result['radio']['name']} at position {result['position']}.")
+            ok(f"Queued for {result['radio']['name']}. {_queue_detail(result)}")
         else:
             _print_session_summary(api.session_state())
     except ApiError as e:
