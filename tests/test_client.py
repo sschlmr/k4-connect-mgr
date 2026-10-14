@@ -295,6 +295,54 @@ async def test_watcher_leaves_the_panel_alone_when_it_saw_no_session(server, mon
     assert server.radio_a.client_count == 1
 
 
+class _BookedSessionApi:
+    """A server whose auto-session booking opens a session after one idle poll;
+    stops the watcher (as Ctrl-C would) once its answers run out."""
+
+    def __init__(self, central, assignment):
+        self.central = central
+        session = {"assignment": assignment, "offer": None, "queued": None}
+        self.states = [_NO_SESSION, session, session]
+
+    def session_state(self):
+        if not self.states:
+            raise KeyboardInterrupt
+        return self.states.pop(0)
+
+    def link_state(self):
+        return {"attached": self.central.client_count >= 1}
+
+
+async def test_waiting_watcher_connects_a_session_the_booking_opened(server, monkeypatch):
+    import asyncio
+
+    from k4cm.client import main as client_main
+
+    server.radio_a.password = "pw"
+    server.radio_a.rrc = 1
+    config = ClientConfig(
+        server_url="https://mh01.net",
+        callsign="W1AW",
+        api_key="k",
+        radio_host="127.0.0.1",
+        radio_cat_port=server.local_radio.cat_port,
+    )
+    assignment = {
+        "id": 7, "opened_by_booking": True, "expiring": False, "acked": False,
+        "expires_at": "2026-10-20T21:00:00+00:00", "seconds_remaining": 7200, "password": "pw",
+        "radio": {"id": "k4a", "name": "K4 A", "connect_host": "127.0.0.1",
+                  "connect_port": server.radio_a.remote_port},
+    }
+    monkeypatch.setattr(client_main, "POLL_SECONDS", 0)
+    api = _BookedSessionApi(server.radio_a, assignment)
+
+    await asyncio.to_thread(client_main._watch_loop, api, config, True)
+
+    assert server.radio_a.client_count == 1
+    # Connected once, not again on the next poll of the same session.
+    assert sum(c.startswith("RRT") for c in server.local_radio.commands) == 1
+
+
 async def test_unreachable_local_radio_is_reported(server):
     dead = server.config.find_radio("k4dead")
     config = ClientConfig(

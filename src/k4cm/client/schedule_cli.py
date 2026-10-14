@@ -161,7 +161,7 @@ def add(
     radio: str = typer.Argument(..., help="Which K4 (id or name)"),
     start: str = typer.Option(..., "--start", help='Local start time, e.g. "2026-10-20 19:00"'),
     duration: str = typer.Option(..., "--duration", help="e.g. 2h, 90m, 1h30m"),
-    mode: str = typer.Option("reserve", "--mode", help="reserve (hold it for you) or auto (open the session)"),
+    mode: str = typer.Option("reserve", "--mode", help="reserve (hold it for you) or auto (open the session; 'k4cm watch' connects your panel)"),
     repeat: str = typer.Option(None, "--repeat", help=REPEAT_HELP),
     every: int = typer.Option(1, "--every", help="Every N days/weeks/months"),
     on: str = typer.Option(None, "--on", help=ON_HELP),

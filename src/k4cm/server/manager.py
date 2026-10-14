@@ -705,7 +705,8 @@ class AssignmentManager:
             self.db.add_notice(
                 occ.owner,
                 f"Your booking of {radio.name} has started and the session is open. "
-                f"Run 'k4cm request {radio.id}' to connect your panel.",
+                f"'k4cm watch' connects your panel if it is running; otherwise run "
+                f"'k4cm request {radio.id}'.",
             )
             self.db.audit("system", "booking.auto_start", f"{radio.id} for {occ.owner} (#{occ.booking_id} {occ.occ_date})")
 
@@ -718,6 +719,18 @@ class AssignmentManager:
             and occ.kind is BookingKind.BOOKING
             and occ.owner == assignment.callsign
             and now < occ.start + self.config.schedule.hold
+        )
+
+    def opened_by_booking(self, assignment: Assignment, now: datetime) -> bool:
+        """True for a session an auto-session booking opened, which a member's
+        running `k4cm watch` connects their panel to (the server cannot reach it)."""
+        occ = self.bookings.current(assignment.radio_id, now)
+        return (
+            occ is not None
+            and occ.kind is BookingKind.BOOKING
+            and occ.mode.value == "auto"
+            and occ.owner == assignment.callsign
+            and assignment.started_at >= occ.start
         )
 
     # -- views -------------------------------------------------------------
@@ -735,6 +748,7 @@ class AssignmentManager:
             "expiring": assignment.is_expiring(session.warn_period),
             "acked": assignment.acked,
             "state": assignment.state.value,
+            "opened_by_booking": self.opened_by_booking(assignment, utcnow()),
             "queue_depth": self.db.queue_depth(assignment.radio_id),
             "warn_period_minutes": session.warn_period_minutes,
             "extension_minutes": session.extension_minutes,

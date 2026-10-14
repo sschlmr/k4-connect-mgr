@@ -166,7 +166,7 @@ copy on the member's machine (Windows: a Start menu shortcut; macOS and Linux:
 k4cm status                 what every K4 is doing, and your own session
 k4cm request k4a            take a specific K4 and connect your panel
 k4cm request k4a --queue    join its queue instead if it is busy
-k4cm watch                  resume the session watcher
+k4cm watch                  watch sessions; connects auto-session bookings
 k4cm release                disconnect and hand the radio back
 k4cm queue --leave          leave the queue
 k4cm request k4a -d 90m     ask for a shorter session than the default
@@ -232,7 +232,9 @@ across daylight-saving changes.
 - **A reservation is held for its owner** for `hold_minutes`. After that,
   others may borrow the radio, warned that the owner can take it back; when
   the owner asks for it, the borrower gets the usual warning and ack grace.
-- **An auto-session booking** opens the session itself at the start time.
+- **An auto-session booking** opens the session itself at the start time. The
+  server cannot reach a member's panel, so a running `k4cm watch` connects it;
+  without one the member runs `k4cm request` to take the session over.
 - **Every other session ends at the next booking**, and an extension is
   refused if a booking, a "Being serviced" block or a queue is in its way.
 - **Admins** can mark a radio "Being serviced" or book with `--override`;

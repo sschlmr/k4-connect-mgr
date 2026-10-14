@@ -118,7 +118,7 @@ dialog::backdrop { background: rgba(15, 23, 42, .35); }
   <div class="row"><label for="fH">Duration</label><input type="number" id="fH" min="0" max="999" style="width:70px"> h <input type="number" id="fM" min="0" max="59" step="15" style="width:70px"> min</div>
   <div class="row" id="modeRow"><span class="lbl">Mode</span>
     <label><input type="radio" name="mode" value="reserve" checked> Reserve</label>
-    <label><input type="radio" name="mode" value="auto"> Auto-session</label></div>
+    <label title="Opens the session at the start time; a running 'k4cm watch' connects your panel"><input type="radio" name="mode" value="auto"> Auto-session</label></div>
   <div class="row hidden" id="adminRow"><span class="lbl">Admin</span>
     <label><input type="checkbox" id="fMaint"> Being serviced</label>
     <label><input type="checkbox" id="fOverride"> Book over members</label></div>
@@ -398,7 +398,7 @@ async function openInfo(o) {
   const kv = $("infoKv"); kv.textContent = "";
   const add = (k, v) => { kv.append(el("div", null, k), el("div", null, v)); };
   add("When", fmtSpan(s, e));
-  if (o.kind === "booking") add("Mode", o.mode === "auto" ? "Auto-session (opens at the start time)" : "Reserve (held for the owner)");
+  if (o.kind === "booking") add("Mode", o.mode === "auto" ? "Auto-session (opens at the start time; a running 'k4cm watch' connects your panel)" : "Reserve (held for the owner)");
   add("Booking", `#${o.booking_id}`);
   const acts = $("infoActions"); acts.textContent = "";
   const close = el("button", null, "Close"); close.type = "button"; close.onclick = () => $("infoDlg").close();

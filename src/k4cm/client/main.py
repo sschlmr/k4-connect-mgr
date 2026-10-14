@@ -2,7 +2,7 @@
 
     k4cm config              set up server URL, callsign, API key, local radio
     k4cm request <radio>     ask for a specific K4 and connect your panel to it
-    k4cm watch               resume the session watcher (timeout negotiation)
+    k4cm watch               watch sessions; connects auto-session bookings
     k4cm release             disconnect and hand the radio back
     k4cm status              what every K4 at the site is doing
     k4cm schedule ...        book radios ahead of time; see who has booked what
@@ -241,7 +241,7 @@ def request(
             raise typer.Exit(code=1)
 
     if not no_watch:
-        _watch_loop(api, cfg)
+        _watch_loop(api, cfg, connected={assignment["id"]})
 
 
 def _server_sees_panel(api: ServerApi) -> Callable[[], bool]:
@@ -417,15 +417,24 @@ def calendar(
 
 @app.command()
 def watch() -> None:
-    """Watch an existing session and handle timeout negotiation."""
+    """Watch your sessions: timeout negotiation, queue offers, and connecting
+    your panel when an auto-session booking opens. Runs until Ctrl-C."""
     api, cfg = get_api()
-    _watch_loop(api, cfg)
+    _watch_loop(api, cfg, wait=True)
 
 
-def _watch_loop(api: ServerApi, cfg: ClientConfig) -> None:
+def _watch_loop(
+    api: ServerApi, cfg: ClientConfig, wait: bool = False, connected: set[int] | None = None
+) -> None:
+    """Poll the server and act on the session. With `wait`, keep going while
+    there is no session and after one ends, so a standing `k4cm watch` is there
+    when a booking opens a session. `connected` holds the ids of sessions whose
+    panel link is already handled, so each is connected at most once."""
     typer.echo("\nWatching your session — Ctrl-C to stop (your session keeps running).")
     warned_expiring = False
     saw_session = False
+    waiting_shown = False
+    connected = set() if connected is None else connected
     try:
         while True:
             try:
@@ -440,6 +449,10 @@ def _watch_loop(api: ServerApi, cfg: ClientConfig) -> None:
 
             if assignment:
                 saw_session = True
+                waiting_shown = False
+                if assignment.get("opened_by_booking") and assignment["id"] not in connected:
+                    connected.add(assignment["id"])
+                    _connect_booked_session(api, cfg, assignment)
                 if assignment["expiring"] and not assignment["acked"]:
                     if _negotiate_timeout(api, cfg, assignment):
                         return
@@ -456,16 +469,49 @@ def _watch_loop(api: ServerApi, cfg: ClientConfig) -> None:
                 typer.echo(
                     f"Queued for {queued['radio']['name']}: position {queued['position']}."
                 )
+            elif wait and not saw_session:
+                if not waiting_shown:
+                    typer.echo("No session right now; waiting for one (an auto-session booking connects your panel).")
+                    waiting_shown = True
             else:
                 typer.echo("\a")
                 warn("Your session has ended (released, reclaimed, expired, or force-released).")
                 if cfg.has_local_radio:
                     typer.echo(f"Local radio: {_end_of_session_disconnect(cfg, saw_session)}")
-                return
+                if not wait:
+                    return
+                saw_session = warned_expiring = False
 
             time.sleep(POLL_SECONDS)
     except KeyboardInterrupt:
         typer.echo("\nStopped watching. Your session is unaffected.")
+
+
+def _connect_booked_session(api: ServerApi, cfg: ClientConfig, assignment: dict[str, Any]) -> None:
+    """Connect the panel to a session an auto-session booking opened. Only this
+    machine can reach the member's panel, so the server opens the session and
+    a running watcher completes it."""
+    typer.echo("\a")
+    _report_assignment(assignment)
+    if not cfg.has_local_radio:
+        warn("No local radio is configured, so nothing was connected automatically.")
+        _print_manual_details(assignment)
+        return
+    if _server_sees_panel(api)():
+        ok("Local radio: already connected.")
+        return
+    try:
+        detail = local_radio.connect(
+            cfg,
+            assignment["radio"]["connect_host"],
+            assignment["radio"]["connect_port"],
+            assignment["password"],
+            _server_sees_panel(api),
+        )
+        ok(f"Local radio: {detail}")
+    except local_radio.RadioError as e:
+        err(f"Your booked session is open but your local radio could not be connected: {e}")
+        warn(f"Run 'k4cm request {assignment['radio']['id']}' to try again.")
 
 
 def _end_of_session_disconnect(cfg: ClientConfig, saw_session: bool) -> str:

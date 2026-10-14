@@ -301,7 +301,9 @@ is booked with the clashing dates skipped, and you're told which and whose.
 
 - `--mode reserve` (the default): at the start time the radio is held for you.
   You still run `k4cm request k4-2` to connect.
-- `--mode auto`: at the start time the station opens the session for you. Run
+- `--mode auto`: at the start time the station opens the session for you. If
+  `k4cm watch` is running on your computer, it connects your panel straight
+  away; leave it running before the booking starts. Otherwise run
   `k4cm request k4-2` to connect your panel to it.
 
 **When the time comes.**
@@ -355,7 +357,7 @@ while you use it; Ctrl-C closes it.
 | `k4cm config` | Set up or change your settings |
 | `k4cm status` | What every radio is doing, your session, your panel |
 | `k4cm request <radio>` | Take a radio and connect your panel |
-| `k4cm watch` | Resume watching your session or queue place |
+| `k4cm watch` | Watch your session or queue place, and connect your panel when an auto-session booking opens. Keeps running until Ctrl-C |
 | `k4cm release` | Disconnect and hand the radio back |
 | `k4cm queue [<radio>]` | Join a queue, or show your place in it |
 | `k4cm queue --leave` | Leave the queue |

@@ -329,6 +329,7 @@ async def test_maintenance_refuses_requests(server, members):
 
 async def test_new_booking_caps_a_running_session(server, members):
     await server.manager.request_assignment("W1AW", "k4a")
+    assert server.manager.session_state("W1AW")["assignment"]["opened_by_booking"] is False
     book(server, members, "K2ABC", at(45))
     await server.manager.enforce_bookings()
     assert server.db.live_assignment_for_callsign("W1AW").expires_at == at(45)
@@ -340,6 +341,8 @@ async def test_auto_session_opens_and_waits_for_the_owner(server, members):
     session = server.db.live_assignment_for_callsign("K2ABC")
     assert session is not None and session.radio_id == "k4a"
     assert server.radio_a.password == session.password
+    # The owner's watcher is told the booking opened it, so it connects the panel.
+    assert server.manager.session_state("K2ABC")["assignment"]["opened_by_booking"] is True
     # Asking for it again hands over the session the booking opened.
     again = await server.manager.request_assignment("K2ABC", "k4a")
     assert again["id"] == session.id
