@@ -393,6 +393,25 @@ def _print_session_summary(state: dict[str, Any]) -> None:
         typer.echo("You have no session and are not queued.")
 
 
+# -- calendar --------------------------------------------------------------
+
+
+@app.command()
+def calendar(
+    port: int = typer.Option(0, "--port", help="Local port for the page (default: any free port)"),
+    no_browser: bool = typer.Option(False, "--no-browser", help="Print the address instead of opening it"),
+) -> None:
+    """Open the booking calendar in your browser (runs until Ctrl-C)."""
+    from .calendar import run_calendar
+
+    api, cfg = get_api()
+    try:
+        api.me()
+    except ApiError as e:
+        fail(e)
+    run_calendar(api, cfg, port, open_browser=not no_browser)
+
+
 # -- watch -----------------------------------------------------------------
 
 

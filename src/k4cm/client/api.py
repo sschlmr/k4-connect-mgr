@@ -108,6 +108,9 @@ class ServerApi:
     def release(self) -> dict:
         return self._request("DELETE", "/assignments/current")
 
+    def me(self) -> dict:
+        return self._request("GET", "/me")
+
     def status(self) -> dict:
         return self._request("GET", "/status")
 

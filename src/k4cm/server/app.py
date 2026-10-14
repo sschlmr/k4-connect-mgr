@@ -170,6 +170,10 @@ def create_app(
     async def release_assignment(user: User = Depends(require_user)):
         return await manager.release(user.callsign)
 
+    @app.get("/me")
+    async def me(user: User = Depends(require_user)):
+        return {"callsign": user.callsign, "is_admin": user.is_admin}
+
     @app.get("/status")
     async def site_status(user: User = Depends(require_user)):
         return {"radios": manager.status(), "time": isoformat(utcnow())}
