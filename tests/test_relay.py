@@ -190,3 +190,70 @@ def test_ipv4_mapped_addresses_compare_equal():
 def test_manager_is_built_with_a_relay(server):
     assert isinstance(server.manager, AssignmentManager)
     assert server.manager.relay.link_count("k4a") == 0
+
+
+# -- why a link ended ---------------------------------------------------------
+
+
+def audited(server, action: str) -> list[str]:
+    return [e.detail for e in server.db.list_audit() if e.action == action]
+
+
+async def connected_session(server) -> dict:
+    result = await server.manager.request_assignment("W1AW", "k4a", MEMBER)
+    assert await panel_connect(server, relay_port(server), result["password"])
+    assert await wait_until(lambda: server.radio_a.client_count == 1)
+    return result
+
+
+async def test_a_session_end_is_recorded_as_the_reason_the_link_closed(relayed):
+    await connected_session(relayed)
+
+    await relayed.manager.release("W1AW")
+
+    assert await wait_until(lambda: audited(relayed, "relay.disconnect"))
+    (detail,) = audited(relayed, "relay.disconnect")
+    assert detail.startswith(f"k4a from {MEMBER} after ")
+    assert ": session ended;" in detail
+
+
+async def test_the_radio_dropping_the_link_is_blamed_on_the_radio(relayed):
+    await connected_session(relayed)
+
+    relayed.radio_a.drop_clients()
+
+    assert await wait_until(lambda: audited(relayed, "relay.disconnect"))
+    (detail,) = audited(relayed, "relay.disconnect")
+    assert "radio closed the link" in detail
+    assert "radio sent 3 B" in detail  # the fake's "OK\n" handshake
+
+
+async def test_the_member_disconnecting_is_blamed_on_the_member(relayed):
+    await connected_session(relayed)
+
+    async with cat.CatClient("127.0.0.1", relayed.local_radio.cat_port) as local:
+        await local.send("RRN;")
+        assert await local.ping()
+
+    assert await wait_until(lambda: audited(relayed, "relay.disconnect"))
+    (detail,) = audited(relayed, "relay.disconnect")
+    assert "member closed the link" in detail
+    assert "member sent 0 B" not in detail  # the panel's password went through
+
+
+async def test_an_unreachable_radio_is_audited(relayed):
+    result = await relayed.manager.request_assignment("W1AW", "k4a", MEMBER)
+    relayed.config.radios["k4a"].remote_port = free_port()  # nothing listening
+
+    assert not await panel_connect(relayed, relay_port(relayed), result["password"])
+
+    assert await wait_until(lambda: audited(relayed, "relay.unreachable"))
+    assert "k4a: cannot reach 127.0.0.1:" in audited(relayed, "relay.unreachable")[0]
+    assert not audited(relayed, "relay.connect")
+
+
+def test_sizes_and_durations_read_naturally():
+    from k4cm.server.relay import _duration, _size
+
+    assert [_size(n) for n in (3, 2048, 5 * 1024 * 1024)] == ["3 B", "2.0 KB", "5.0 MB"]
+    assert [_duration(s) for s in (9.84, 125, 7300)] == ["9.8s", "2m05s", "2h01m"]

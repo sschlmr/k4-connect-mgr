@@ -16,6 +16,11 @@ A connection is admitted only while the radio has an ACTIVE session and, with
 the API. The radio's own password is still required behind the relay, so the
 relay adds a gate and never removes one. Refusals are logged but not audited,
 since a forwarded port attracts scanners and the audit trail would fill up.
+
+An admitted link's end is audited (`relay.disconnect`) with how long it lasted,
+the bytes each way, and which side closed first. Without that, a link that
+drops mid-session leaves only a run of `relay.connect` redials, which looks
+the same whether the member's internet, the site LAN or the radio failed.
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ import asyncio
 import contextlib
 import ipaddress
 import logging
+import time
 from collections import defaultdict
 
 from ..models import AssignmentState, Radio
@@ -57,6 +63,9 @@ class _Link:
         self.addr = addr
         self.radio: asyncio.StreamWriter | None = None
         self.cut = False
+        self.sent = {"member": 0, "radio": 0}  # bytes each side sent through us
+        self.heard = {"member": 0.0, "radio": 0.0}  # monotonic time each side last sent
+        self.ended_by: str | None = None       # the first side to close, and how
 
     def abort(self) -> None:
         self.cut = True
@@ -163,28 +172,80 @@ class RelayManager:
                 self.config.monitor.cat_timeout_seconds,
             )
         except (TimeoutError, OSError) as e:
-            self.logger.warning("relay %s: cannot reach %s:%s: %s", radio.id, radio.host, radio.remote_port, e)
+            detail = f"{radio.id}: cannot reach {radio.host}:{radio.remote_port}: {e or type(e).__name__}"
+            self.logger.warning("relay %s", detail)
+            self.db.audit(self._callsign(link), "relay.unreachable", detail)
             return
         if link.cut:  # the session ended while we were connecting
             return
 
-        assignment = self.db.get_assignment(link.assignment_id)
-        callsign = assignment.callsign if assignment else "?"
+        callsign = self._callsign(link)
         self.db.audit(callsign, "relay.connect", f"{radio.id} from {link.addr}")
+        started = time.monotonic()
+        link.heard = {"member": started, "radio": started}
         await asyncio.gather(
-            self._copy(member_reader, link.radio),
-            self._copy(radio_reader, link.member),
+            self._copy(member_reader, link.radio, link, "member"),
+            self._copy(radio_reader, link.member, link, "radio"),
             return_exceptions=True,
         )
+        ended = time.monotonic()
+        how = "session ended" if link.cut else (link.ended_by or "closed")
+        # A K4 hangs up on a client silent for ~10 s, so "radio closed the link"
+        # after a long member silence means the member's path died, not the radio.
+        detail = (
+            f"{radio.id} from {link.addr} after {_duration(ended - started)}: {how}; "
+            f"member sent {_size(link.sent['member'])} (last {_duration(ended - link.heard['member'])} before), "
+            f"radio sent {_size(link.sent['radio'])} (last {_duration(ended - link.heard['radio'])} before)"
+        )
+        self.logger.info("relay %s", detail)
+        self.db.audit(callsign, "relay.disconnect", detail)
+
+    def _callsign(self, link: _Link) -> str:
+        assignment = self.db.get_assignment(link.assignment_id)
+        return assignment.callsign if assignment else "?"
 
     @staticmethod
-    async def _copy(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    async def _copy(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, link: _Link, side: str) -> None:
+        """Pump what `side` sends to the other side, recording who ends the link.
+
+        A read error is `side` failing; a write error is the other side failing.
+        """
+        other = "radio" if side == "member" else "member"
+        who, how = side, "closed the link"
         try:
-            while data := await reader.read(PUMP_CHUNK):
-                writer.write(data)
-                await writer.drain()
-        except OSError:
-            pass
+            while True:
+                try:
+                    data = await reader.read(PUMP_CHUNK)
+                except OSError as e:
+                    how = f"failed ({type(e).__name__})"
+                    break
+                if not data:
+                    break
+                link.sent[side] += len(data)
+                link.heard[side] = time.monotonic()
+                try:
+                    writer.write(data)
+                    await writer.drain()
+                except OSError as e:
+                    who, how = other, f"failed ({type(e).__name__})"
+                    break
         finally:
+            # The first side to stop wins; the other copy only sees the abort below.
+            if link.ended_by is None and not link.cut:
+                link.ended_by = f"{who} {how}"
             # Either side going away ends the link in both directions.
             writer.transport.abort()
+
+def _size(n: int) -> str:
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.1f} KB"
+    return f"{n / (1024 * 1024):.1f} MB"
+
+
+def _duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, secs = divmod(int(seconds), 60)
+    return f"{minutes}m{secs:02d}s" if minutes < 60 else f"{minutes // 60}h{minutes % 60:02d}m"

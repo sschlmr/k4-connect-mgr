@@ -71,6 +71,11 @@ class FakeK4:
         self._cat_server = None
         self._remote_server = None
 
+    def drop_clients(self) -> None:
+        """Close every attached remote client, as a K4 does with one gone silent."""
+        for writer in list(self._remote_clients):
+            writer.close()
+
     # -- state helpers -----------------------------------------------------
 
     @property

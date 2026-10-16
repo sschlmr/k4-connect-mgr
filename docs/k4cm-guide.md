@@ -121,6 +121,7 @@ Admin commands run from any client configured with the admin key.
 - **Backups**: nightly by SQLite's online backup API, safe while running. Point `[backup] directory` at a share for off-machine copies. To restore, stop the scheduled task, replace `k4cm.db`, start it again.
 - **Health**: `GET /health` needs no authentication and exposes no data.
 - **Certificate rotation**: every client fails loudly until its member re-runs `k4cm config`. Rotate deliberately and announce the new fingerprint.
+- **Diagnosing dropped links**: `k4cm admin audit` records each relayed link's end as `relay.disconnect`: how long it lasted, which side closed it first, and the bytes and last data from each side. A K4 hangs up on a client silent for about 10 s, so "radio closed the link" with the member's last data about 10 s before means the member's internet path died; the radio closing while the member was still sending points at the radio or the site LAN. `relay.unreachable` means the server could not reach the radio's remote port at all.
 - **Relay latency**: `scripts/relay_latency.py` on the server PC measures what the relay adds (about 0.25 ms per round trip on a Mac).
 
 ## User guide
