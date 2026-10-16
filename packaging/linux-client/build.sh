@@ -4,7 +4,7 @@
 #   ./packaging/linux-client/build.sh
 #
 # Produces packaging/out/k4cm-client-<version>-linux-<arch>.tar.gz containing
-# the k4cm executable, an install.sh and the member guide. If `fpm` is available a .deb is built
+# the k4cm executable, an install.sh and the guide. If `fpm` is available a .deb is built
 # as well. Run from the project root on the oldest glibc you need to support.
 
 set -euo pipefail
@@ -28,7 +28,7 @@ chmod 755 "$STAGE/k4cm"
 cp packaging/linux-client/install.sh "$STAGE/install.sh"
 chmod 755 "$STAGE/install.sh"
 cp README.md "$STAGE/README.md" 2>/dev/null || true
-cp docs/k4cm-user-guide.md "$STAGE/k4cm-user-guide.md"
+cp docs/k4cm-guide.md "$STAGE/k4cm-guide.md"
 
 mkdir -p "$OUT"
 TARBALL="$OUT/k4cm-client-$VERSION-linux-$ARCH.tar.gz"
@@ -45,7 +45,7 @@ if command -v fpm >/dev/null 2>&1; then
         --license MIT \
         -p "$OUT/k4cm-client_${VERSION}_${ARCH}.deb" \
         "$STAGE/k4cm=/usr/local/bin/k4cm" \
-        "$STAGE/k4cm-user-guide.md=/usr/local/share/doc/k4cm/k4cm-user-guide.md"
+        "$STAGE/k4cm-guide.md=/usr/local/share/doc/k4cm/k4cm-guide.md"
     echo "Built: $OUT/k4cm-client_${VERSION}_${ARCH}.deb"
 else
     echo "fpm not installed - skipping the .deb (the tarball is enough)."

@@ -157,9 +157,9 @@ commonly flagged regardless of what they contain).
 
 ## Using it
 
-The member guide, [docs/k4cm-user-guide.md](docs/k4cm-user-guide.md), covers
-all of this for members of the mh01.net station. Every client installer puts a
-copy on the member's machine (Windows: a Start menu shortcut; macOS and Linux:
+The guide, [docs/k4cm-guide.md](docs/k4cm-guide.md), covers the whole service
+in four parts: admin, user, calendar and internals. Every client installer puts
+a copy on the member's machine (Windows: a Start menu shortcut; macOS and Linux:
 `/usr/local/share/doc/k4cm/`).
 
 ```

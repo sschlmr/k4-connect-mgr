@@ -33,15 +33,17 @@ WizardStyle=modern
 ; Installing over an older version: clear the old runtime so no stale files
 ; remain. User data in %APPDATA%\k4cm is elsewhere and untouched.
 Type: filesandordirs; Name: "{app}\_internal"
+; The guide was k4cm-user-guide.md before 0.2.0.
+Type: files; Name: "{app}\k4cm-user-guide.md"
 
 [Files]
 Source: "..\..\dist\k4cm\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "..\..\docs\k4cm-user-guide.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\docs\k4cm-guide.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\k4cm (command prompt)"; Filename: "{cmd}"; Parameters: "/K ""{app}\{#ClientExe}"" --help"
 ; Notepad, because Windows has no default program for .md files.
-Name: "{group}\K4CM User Guide"; Filename: "{win}\notepad.exe"; Parameters: """{app}\k4cm-user-guide.md"""
+Name: "{group}\K4CM Guide"; Filename: "{win}\notepad.exe"; Parameters: """{app}\k4cm-guide.md"""
 
 [Run]
 Filename: "{cmd}"; Parameters: "/K ""{app}\{#ClientExe}"" config"; \

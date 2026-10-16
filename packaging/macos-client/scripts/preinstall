@@ -3,6 +3,7 @@
 # replaces files, so remove the previous program folder first: an upgrade then
 # leaves nothing stale behind. User settings (~/.config/k4cm) are not touched.
 rm -rf /usr/local/libexec/k4cm
+rm -f /usr/local/share/doc/k4cm/k4cm-user-guide.md   # the guide's name before 0.2.0
 # Only our own symlink; never a k4cm installed some other way (e.g. pipx).
 if [ -L /usr/local/bin/k4cm ]; then
     case "$(readlink /usr/local/bin/k4cm)" in

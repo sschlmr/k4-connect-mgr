@@ -29,10 +29,11 @@ fi
 install -m 755 "$SOURCE" "$BINDIR/k4cm"
 echo "Installed $BINDIR/k4cm"
 
-if [ -f "$HERE/k4cm-user-guide.md" ]; then
+if [ -f "$HERE/k4cm-guide.md" ]; then
     mkdir -p "$DOCDIR"
-    install -m 644 "$HERE/k4cm-user-guide.md" "$DOCDIR/k4cm-user-guide.md"
-    echo "Installed $DOCDIR/k4cm-user-guide.md"
+    install -m 644 "$HERE/k4cm-guide.md" "$DOCDIR/k4cm-guide.md"
+    rm -f "$DOCDIR/k4cm-user-guide.md"   # its name before 0.2.0
+    echo "Installed $DOCDIR/k4cm-guide.md"
 fi
 
 case ":$PATH:" in
@@ -42,4 +43,4 @@ esac
 
 echo
 echo "Next: run 'k4cm config' to set the server address, your callsign and API key."
-echo "The member guide is $DOCDIR/k4cm-user-guide.md"
+echo "The guide is $DOCDIR/k4cm-guide.md"
