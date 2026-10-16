@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "k4-connect-mgr"
-version = "0.2.0rc2"
+version = "0.2.0"
 description = "Connection manager for shared remote Elecraft K4 stations (central assignment server + local client CLI)"
 readme = "README.md"
 requires-python = ">=3.11"
