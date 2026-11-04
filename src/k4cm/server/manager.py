@@ -865,6 +865,7 @@ class AssignmentManager:
     async def reload_radios(self, actor: str) -> dict[str, Any]:
         try:
             count = self.config.reload_radios()
+            timing = self.config.reload_relay_timing()
         except (OSError, ValueError) as e:
             raise ManagerError(400, f"could not reload radio inventory: {e}") from e
         await self.relay.sync()
@@ -872,7 +873,7 @@ class AssignmentManager:
         for radio_id in list(self.reachability):
             if radio_id not in known:
                 self.reachability.pop(radio_id, None)
-        self.db.audit(actor, "radios.reload", f"{count} radio(s) loaded")
+        self.db.audit(actor, "radios.reload", f"{count} radio(s) loaded, relay timing {'on' if timing else 'off'}")
         self.logger.info("radio inventory reloaded by %s: %d radio(s)", actor, count)
         orphans = sorted(
             {a.radio_id for a in self.db.active_assignments() if a.radio_id not in known}

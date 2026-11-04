@@ -67,6 +67,12 @@ bind = "0.0.0.0"
 # Admit only the address the member last reached this server's API from. Turn
 # off only if members' panels and computers reach the internet differently.
 check_address = true
+# Log how smoothly each relayed link flows, for a panel that stays connected
+# but stutters. Off normally; 'k4cm admin radios --reload' applies a change
+# without a restart. Gaps and waits at least timing_gap_ms long are counted.
+timing = false
+timing_report_seconds = 10
+timing_gap_ms = 150
 
 [storage]
 database = "k4cm.db"
@@ -194,6 +200,9 @@ class MonitorSettings:
 class RelaySettings:
     bind: str = "0.0.0.0"
     check_address: bool = True
+    timing: bool = False
+    timing_report_seconds: float = 10.0
+    timing_gap_ms: float = 150.0
 
 
 @dataclass
@@ -268,6 +277,15 @@ class ServerConfig:
         raw = _read_toml(self.path)
         self.radios = _parse_radios(raw)
         return len(self.radios)
+
+    def reload_relay_timing(self) -> bool:
+        """Re-read only the `[relay] timing*` keys, so stream timing can be
+        switched on and off without a restart. Returns whether it is on."""
+        fresh = _section(_read_toml(self.path), "relay", RelaySettings)
+        self.relay.timing = fresh.timing
+        self.relay.timing_report_seconds = fresh.timing_report_seconds
+        self.relay.timing_gap_ms = fresh.timing_gap_ms
+        return self.relay.timing
 
 
 def _read_toml(path: Path) -> dict[str, Any]:

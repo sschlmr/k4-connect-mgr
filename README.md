@@ -270,6 +270,25 @@ from the internet with a publicly trusted certificate.
   share for off-machine copies. To restore: stop the scheduled task, replace
   `k4cm.db`, start it again.
 - **Health**: `GET /health` needs no authentication and exposes no data.
+- **A stuttering panel**: if a member's link stays up but the panadapter or
+  audio pauses, and ping to the site looks clean, set `timing = true` under
+  `[relay]` in `server.toml` and run `k4cm admin radios --reload` (no restart;
+  open links are included). Every `timing_report_seconds` (10) the log gets a
+  line per link, for example:
+
+  ```
+  relay timing K4-1 from 203.0.113.5 10.0s: radio->member 2210 chunks, 1.9 MB,
+  longest gap 412 ms (6 >= 150 ms), longest send wait 1 ms (0 >= 150 ms),
+  backlog up to 4.0 KB; member->radio ...; event loop late by up to 3 ms
+  ```
+
+  Gaps in `radio->member` mean the radio or the site LAN sent it that way.
+  A large `event loop late` means this server stalled. Long send waits or a
+  big backlog mean the path to the member is backing up. If all of them are
+  small while the member still sees pauses, look at the member's internet path
+  or the panel. (The operating system's send buffer can absorb a short
+  backup, so a small backlog doesn't fully clear the path.) Set
+  `timing = false` and reload again when you're done.
 
 ## Security notes
 

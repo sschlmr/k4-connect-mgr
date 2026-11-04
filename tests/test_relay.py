@@ -9,6 +9,9 @@ session's member.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import logging
+import re
 import socket
 
 import pytest_asyncio
@@ -257,3 +260,103 @@ def test_sizes_and_durations_read_naturally():
 
     assert [_size(n) for n in (3, 2048, 5 * 1024 * 1024)] == ["3 B", "2.0 KB", "5.0 MB"]
     assert [_duration(s) for s in (9.84, 125, 7300)] == ["9.8s", "2m05s", "2h01m"]
+
+
+# -- stream timing ------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def streaming(relayed):
+    """k4a's remote port replaced by a radio that streams with one 400 ms pause,
+    the kind of stutter the timing report is for."""
+
+    async def stream(reader, writer):
+        with contextlib.suppress(ConnectionError):
+            for i in range(12):
+                writer.write(b"x" * 1000)
+                await writer.drain()
+                await asyncio.sleep(0.4 if i == 5 else 0.02)
+            await reader.read()  # stay up until the relay hangs up
+
+    radio_side = await asyncio.start_server(stream, "127.0.0.1", 0)
+    relayed.config.radios["k4a"].remote_port = radio_side.sockets[0].getsockname()[1]
+    relayed.config.relay.timing_report_seconds = 0.3
+    relayed.config.relay.timing_gap_ms = 200
+    reports: list[str] = []
+
+    class Collect(logging.Handler):
+        def emit(self, record):
+            if record.getMessage().startswith("relay timing k4a"):
+                reports.append(record.getMessage())
+
+    handler = Collect()
+    relayed.manager.logger.addHandler(handler)
+    relayed.manager.logger.setLevel(logging.INFO)
+    relayed.reports = reports
+    relayed.original_config = relayed.config.path.read_text(encoding="utf-8")
+    try:
+        yield relayed
+    finally:
+        relayed.manager.logger.removeHandler(handler)
+        radio_side.close()
+
+
+async def member_link(server):
+    """A member session and a raw connection through the relay, read until closed."""
+    await server.manager.request_assignment("W1AW", "k4a", MEMBER)
+    reader, writer = await asyncio.open_connection("127.0.0.1", relay_port(server))
+    writer.write(b"hello")
+    return asyncio.create_task(reader.read()), writer
+
+
+async def test_timing_is_off_by_default(streaming):
+    _, writer = await member_link(streaming)
+    await asyncio.sleep(0.8)
+
+    assert not streaming.manager.relay.timing
+    assert streaming.reports == []
+    writer.close()
+
+
+async def test_timing_reports_a_pause_in_what_the_radio_sends(streaming):
+    streaming.config.relay.timing = True
+    await streaming.manager.relay.sync()
+    _, writer = await member_link(streaming)
+
+    assert await wait_until(lambda: any("(1 >= 200 ms)" in r.split(";")[0] for r in streaming.reports))
+    report = next(r for r in streaming.reports if "(1 >= 200 ms)" in r.split(";")[0])
+    assert f"relay timing k4a from {MEMBER} " in report
+    assert "radio->member " in report and "member->radio " in report
+    assert "event loop late by up to" in report
+    writer.close()
+
+
+def write_site_config(server, relay: str) -> None:
+    """Rewrite server.toml to match the in-memory k4a, so a reload keeps the
+    link up, with `relay` as the [relay] section's body."""
+    radio = server.config.radios["k4a"]
+    text = server.original_config
+    k4a = re.search(r'id = "k4a".*?remote_port = \d+', text, flags=re.DOTALL).group(0)
+    text = text.replace(k4a, re.sub(r"remote_port = \d+", f"remote_port = {radio.remote_port}", k4a)
+                        + f"\nrelay_port = {radio.relay_port}\npublic_port = {radio.public_port}")
+    server.config.path.write_text(text.replace("[storage]", f"[relay]\n{relay}\n\n[storage]", 1), encoding="utf-8")
+
+
+async def test_reload_turns_timing_on_and_off_for_an_open_link(streaming):
+    _, writer = await member_link(streaming)
+    assert await wait_until(lambda: streaming.manager.relay.link_count("k4a") == 1)
+
+    write_site_config(streaming, 'bind = "127.0.0.1"\ntiming = true\ntiming_report_seconds = 0.3')
+    await streaming.manager.reload_radios("ADMIN")
+    assert streaming.manager.relay.timing
+    assert await wait_until(lambda: streaming.reports)
+    assert audited(streaming, "radios.reload")[-1].endswith("relay timing on")
+
+    write_site_config(streaming, 'bind = "127.0.0.1"\ntiming = false')
+    await streaming.manager.reload_radios("ADMIN")
+    assert not streaming.manager.relay.timing
+    assert streaming.manager.relay.link_count("k4a") == 1
+    count = len(streaming.reports)
+    await asyncio.sleep(0.5)
+    assert len(streaming.reports) == count
+    writer.close()
