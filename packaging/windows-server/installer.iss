@@ -8,7 +8,7 @@
 ; C:\ProgramData\k4cm and is never touched by install, upgrade or uninstall.
 
 #define AppName "K4 Connect Manager"
-#define AppVersion "0.2.1"
+#define AppVersion "0.2.2"
 #define AppPublisher "K4 Connect Manager"
 #define ServerExe "k4cm-server.exe"
 #define TaskServer "K4CM Server"
