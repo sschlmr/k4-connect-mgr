@@ -14,13 +14,13 @@ booking so a series follows local time across daylight-saving changes.
 
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta
+from datetime import UTC, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import typer
 
-from ..schedule import ScheduleError, parse_duration, parse_until
+from ..schedule import START_HELP, ScheduleError, parse_duration, parse_until
 from .api import ApiError, ServerApi
 from .config import ClientConfig
 
@@ -54,6 +54,13 @@ def local(iso: str, cfg: ClientConfig) -> datetime:
 def fmt_when(iso: str, cfg: ClientConfig, with_year: bool = True) -> str:
     d = local(iso, cfg)
     return f"{d:%a} {d.day} {d:%b}" + (f" {d.year}" if with_year else "") + f" {d:%H:%M}"
+
+
+def fmt_gmt(start: str, end: str) -> str:
+    """'14:41-18:41 GMT': the same span on the clock hams log in, to confirm against."""
+    a, b = datetime.fromisoformat(start).astimezone(UTC), datetime.fromisoformat(end).astimezone(UTC)
+    tail = f"{b:%H:%M}" if a.date() == b.date() else f"{b:%a} {b.day} {b:%b} {b:%H:%M}"
+    return f"{a:%H:%M}-{tail} GMT"
 
 
 def fmt_span(start: str, end: str, cfg: ClientConfig) -> str:
@@ -113,7 +120,7 @@ def _check_duration(duration: str | None) -> None:
 
 def _print_preview(result: dict[str, Any], cfg: ClientConfig) -> None:
     for d in result["dates"]:
-        line = f"  {fmt_span(d['start'], d['end'], cfg)}"
+        line = f"  {fmt_span(d['start'], d['end'], cfg)}  ({fmt_gmt(d['start'], d['end'])})"
         if d["skipped"]:
             typer.secho(f"{line}   skipped: {d['blocked_by']}", fg=typer.colors.YELLOW)
         else:
@@ -124,6 +131,10 @@ def _print_preview(result: dict[str, Any], cfg: ClientConfig) -> None:
         )
     if result.get("last") and result["total"] > 1:
         typer.echo(f"{result['booked']} date(s), last on {fmt_when(result['last'], cfg)}")
+    cut = result.get("interrupts")
+    if cut:
+        when = "NOW" if cut["now"] else f"at {fmt_when(cut['at'], cfg, with_year=False)}"
+        _main().warn(f"  {cut['callsign']} is on {cut['radio']}: their session will end {when}")
 
 
 def _confirm(question: str, yes: bool) -> bool:
@@ -150,7 +161,9 @@ def _book(api: ServerApi, cfg: ClientConfig, body: dict[str, Any], yes: bool) ->
         result = api.create_booking(body)
     except ApiError as e:
         main.fail(e)
-    main.ok(f"{result['summary']} Booking #{result['booking']['id']}.")
+    first = next((d for d in result["dates"] if not d["skipped"]), None)
+    when = f" Starts {fmt_when(first['start'], cfg)} ({fmt_gmt(first['start'], first['end'])})." if first else ""
+    main.ok(f"{result['summary']}{when} Booking #{result['booking']['id']}.")
 
 
 # -- commands ----------------------------------------------------------------
@@ -159,7 +172,7 @@ def _book(api: ServerApi, cfg: ClientConfig, body: dict[str, Any], yes: bool) ->
 @schedule_app.command("add")
 def add(
     radio: str = typer.Argument(..., help="Which K4 (id or name)"),
-    start: str = typer.Option(..., "--start", help='Local start time, e.g. "2026-10-20 19:00"'),
+    start: str = typer.Option(..., "--start", help=f"Local start: {START_HELP}"),
     duration: str = typer.Option(..., "--duration", help="e.g. 2h, 90m, 1h30m"),
     mode: str = typer.Option("reserve", "--mode", help="reserve (hold it for you) or auto (open the session; 'k4cm watch' connects your panel)"),
     repeat: str = typer.Option(None, "--repeat", help=REPEAT_HELP),
@@ -254,7 +267,7 @@ def edit(
     booking_id: int = typer.Argument(..., help="Booking number"),
     scope: str = typer.Option("all", "--scope", help="this (one date), following (this and later), all"),
     on_date: str = typer.Option(None, "--date", help="The date a 'this' or 'following' edit applies to"),
-    start: str = typer.Option(None, "--start", help='New local start, e.g. "2026-10-20 20:00"'),
+    start: str = typer.Option(None, "--start", help=f"New local start: {START_HELP}"),
     duration: str = typer.Option(None, "--duration", help="New length, e.g. 90m"),
     mode: str = typer.Option(None, "--mode", help="reserve or auto"),
     radio: str = typer.Option(None, "--radio", help="Move to another radio"),
@@ -334,7 +347,7 @@ def remove(
 
 def service(
     radio: str = typer.Argument(..., help="Which K4"),
-    start: str = typer.Option(..., "--start", help='Local start, e.g. "2026-10-20 09:00"'),
+    start: str = typer.Option(..., "--start", help=f"Local start: {START_HELP}"),
     duration: str = typer.Option(..., "--duration", help="e.g. 4h"),
     repeat: str = typer.Option(None, "--repeat", help=REPEAT_HELP),
     every: int = typer.Option(1, "--every"),

@@ -113,6 +113,7 @@ Admin commands run from any client configured with the admin key.
 | `k4cm admin sessions --force-release 42` | End someone's session |
 | `k4cm admin audit --hours 24` | Read the audit trail |
 | `k4cm admin service k4-1 --start "2026-10-20 09:00" --duration 4h` | Mark a radio "Being serviced" |
+| `k4cm admin service k4-1 --start now --duration 2h` | Take a radio out of use straight away; whoever is on it is cut off within a few seconds |
 | `k4cm schedule add ... --override` | Book over members' bookings; they get a notice |
 
 ### Operations
@@ -292,7 +293,14 @@ k4cm schedule add k4-2 --start "2026-10-20 19:00" --duration 2h \
      --repeat monthly --on 3rd-tue --until 2026-12-31
 ```
 
-k4cm always lists the dates, the last one, and any skipped ones, and asks before booking.
+k4cm always lists the dates (in your time and in GMT), the last one, and any skipped
+ones, and asks before booking. If the booking will end someone's session early, it says so.
+
+`--start` takes your local time as `2026-10-20 19:00`, or in words: `now`, `noon`,
+a time today (`9:00`, `14:30`, `2pm`, `at 2:30pm`), or `today`, `tomorrow` or a
+weekday followed by a time (`tomorrow 9am`, `tue 19:00`). A weekday means the
+next one, today included. A time that has already passed today is an error, not
+tomorrow. A plain hour such as `2` is refused: write `2:00`, `14:00` or `2pm`.
 
 | `--repeat` | `--on` examples |
 | --- | --- |

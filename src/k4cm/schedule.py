@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dateutil.rrule import rrulestr
@@ -79,15 +79,95 @@ def zone(name: str) -> ZoneInfo:
         raise ScheduleError(f"unknown time zone: {name!r}") from e
 
 
-def parse_local_start(text: str) -> datetime:
-    """'2026-10-20 19:00' (or with a T) → naive local datetime."""
-    try:
-        value = datetime.fromisoformat(text.strip().replace(" ", "T", 1))
-    except ValueError as e:
-        raise ScheduleError(f"start must look like 2026-10-20 19:00, not {text!r}") from e
-    if value.tzinfo is not None:
-        raise ScheduleError("give the start in your local time, without a time-zone offset")
-    return value.replace(second=0, microsecond=0)
+START_HELP = (
+    "now, noon, 9:00, 2pm, today 14:30, tomorrow 9am, tue 19:00 or 2026-10-20 19:00"
+)
+_START_ERROR = f"start must be one of: {START_HELP} — not {{text!r}}"
+_CLOCK = re.compile(r"^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$")
+_ISO_START = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:[ t]+|$)")
+
+
+def _parse_clock(text: str) -> time | None:
+    """'noon', '9:00', '09:00', '14:30', '2pm', '2:30pm' → time; None if not a time.
+
+    A bare number with no minutes and no am/pm ('2', '14') is refused: it is
+    unclear whether '2' means 02:00 or 14:00.
+    """
+    if text == "noon":
+        return time(12, 0)
+    match = _CLOCK.fullmatch(text)
+    if not match:
+        return None
+    hour, minute, half = int(match.group(1)), int(match.group(2) or 0), match.group(3)
+    if half:
+        if not 1 <= hour <= 12:
+            return None
+        hour = hour % 12 + (12 if half == "pm" else 0)
+    elif match.group(2) is None:
+        return None
+    if hour > 23 or minute > 59:
+        return None
+    return time(hour, minute)
+
+
+def parse_local_start(text: str, tz: str | ZoneInfo | None = None, now: datetime | None = None) -> datetime:
+    """A start as members type it → naive local datetime, to the minute.
+
+    Besides '2026-10-20 19:00' (or with a T), this takes the words admins reach
+    for when they need a radio *now*: 'now', 'noon', a time today ('9:00',
+    '2pm', 'at 14:30'), 'today'/'tomorrow' or a weekday plus a time. Words are
+    relative, so they need the booking's zone and are resolved where the
+    booking is made — on the server, at each call — which keeps a 'now'
+    preview valid however long the admin takes to confirm it.
+
+    A relative start that has already passed is an error rather than being
+    rolled forward: moving a block to another day without being asked is the
+    kind of slip the preview cannot be relied on to catch.
+    """
+    raw = " ".join(text.strip().lower().split())
+    raw = raw.removeprefix("at ")
+    iso = _ISO_START.match(raw)
+    if iso:
+        day_text, rest = iso.group(1), raw[iso.end():]
+        try:
+            day = date.fromisoformat(day_text)
+        except ValueError as e:
+            raise ScheduleError(f"{day_text!r} is not a real date") from e
+        clock = _parse_clock(rest.removeprefix("at "))
+        if clock is None:
+            if re.search(r"[+-]\d{2}:?\d{2}$|z$", rest):
+                raise ScheduleError("give the start in your local time, without a time-zone offset")
+            raise ScheduleError(_START_ERROR.format(text=text))
+        return datetime.combine(day, clock)
+
+    if tz is None:
+        raise ScheduleError(_START_ERROR.format(text=text))
+    zone_info = tz if isinstance(tz, ZoneInfo) else zone(tz)
+    here = (now or datetime.now(UTC)).astimezone(zone_info).replace(tzinfo=None, second=0, microsecond=0)
+    if raw == "now":
+        return here
+
+    day_word, _, rest = raw.partition(" ")
+    if day_word == "today":
+        day, label = here.date(), "today"
+    elif day_word == "tomorrow":
+        day, label = here.date() + timedelta(days=1), "tomorrow"
+    elif day_word in _WEEKDAYS:
+        ahead = (_WEEKDAY_ORDER.index(_WEEKDAYS[day_word]) - here.weekday()) % 7
+        day = here.date() + timedelta(days=ahead)
+        label = "today" if ahead == 0 else f"{day:%a} {day.day} {day:%b}"
+    else:
+        day, label, rest = here.date(), "today", raw
+    clock = _parse_clock(rest.removeprefix("at "))
+    if clock is None:
+        raise ScheduleError(_START_ERROR.format(text=text))
+    value = datetime.combine(day, clock)
+    if value < here:
+        raise ScheduleError(
+            f"{clock:%H:%M} {label} has already passed (it is {here:%H:%M} now). "
+            f"Did you mean 'tomorrow {clock:%H:%M}', or 'now'?"
+        )
+    return value
 
 
 _DURATION = re.compile(r"^(?:(\d+)h)?\s*(?:(\d+)m)?$")

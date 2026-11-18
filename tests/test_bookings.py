@@ -38,11 +38,11 @@ def members(server):
     return {c: server.db.get_user(c) for c in ("ADMIN", "W1AW", "K2ABC")}
 
 
-def book(server, members, who, start, duration="2h", radio="k4a", **kw):
+def book(server, members, who, start, duration="2h", radio="k4a", dry_run=False, **kw):
     return server.manager.bookings.create(
         members[who],
         BookingInput(radio=radio, start=text(start), duration=duration, tz="UTC", **kw),
-        dry_run=kw.pop("dry_run", False) if "dry_run" in kw else False,
+        dry_run=dry_run,
     )
 
 
@@ -117,6 +117,68 @@ def test_durations():
     assert parse_duration("2:15") == 135
     with pytest.raises(ScheduleError):
         parse_duration("soon")
+
+
+# -- friendly start times ----------------------------------------------------
+
+# Tue 17 Nov 2026 10:20 in New York (15:20 UTC).
+NOW = datetime(2026, 11, 17, 15, 20, 30, tzinfo=UTC)
+NY = "America/New_York"
+
+
+@pytest.mark.parametrize(
+    ("typed", "expected"),
+    [
+        ("now", "2026-11-17 10:20"),
+        ("NOW", "2026-11-17 10:20"),
+        ("noon", "2026-11-17 12:00"),
+        ("at noon", "2026-11-17 12:00"),
+        ("14:30", "2026-11-17 14:30"),
+        ("at 2pm", "2026-11-17 14:00"),
+        ("2:30 pm", "2026-11-17 14:30"),
+        ("11am", "2026-11-17 11:00"),
+        ("12pm", "2026-11-17 12:00"),
+        ("today 10:20", "2026-11-17 10:20"),
+        ("tomorrow 9am", "2026-11-18 09:00"),
+        ("tomorrow 9:00", "2026-11-18 09:00"),
+        ("tomorrow at noon", "2026-11-18 12:00"),
+        ("tomorrow 12am", "2026-11-18 00:00"),
+        ("tue 19:00", "2026-11-17 19:00"),       # today is Tuesday
+        ("mon 19:00", "2026-11-23 19:00"),
+        ("friday 6pm", "2026-11-20 18:00"),
+        ("2026-12-01 9:00", "2026-12-01 09:00"),
+        ("2026-12-01 09:00", "2026-12-01 09:00"),
+        ("2026-12-01T09:00", "2026-12-01 09:00"),
+        ("2026-12-01 at 2pm", "2026-12-01 14:00"),
+    ],
+)
+def test_friendly_starts(typed, expected):
+    assert wall(typed, NY, NOW) == wall(expected)
+
+
+@pytest.mark.parametrize("typed", ["9am", "today 10:19", "tue 08:00", "at 10:00"])
+def test_a_passed_time_today_is_an_error_not_tomorrow(typed):
+    with pytest.raises(ScheduleError, match="already passed.*tomorrow"):
+        wall(typed, NY, NOW)
+
+
+@pytest.mark.parametrize(
+    "typed", ["soon", "2", "14", "13pm", "25:00", "9:75", "tomorrow", "next tue 9am", "2026-12-01"]
+)
+def test_unclear_starts_are_refused(typed):
+    with pytest.raises(ScheduleError, match="start must be one of"):
+        wall(typed, NY, NOW)
+
+
+def test_time_zone_offsets_are_still_refused():
+    with pytest.raises(ScheduleError, match="without a time-zone offset"):
+        wall("2026-12-01 09:00+02:00")
+
+
+def test_now_follows_the_booking_zone():
+    assert wall("now", "UTC", NOW) == wall("2026-11-17 15:20")
+    assert wall("now", "Europe/London", NOW) == wall("2026-11-17 15:20")
+    assert wall("now", "Asia/Tokyo", NOW) == wall("2026-11-18 00:20")
 
 
 # -- creating and conflicts --------------------------------------------------
@@ -325,6 +387,30 @@ async def test_maintenance_refuses_requests(server, members):
     book(server, members, "ADMIN", at(0), kind="maintenance")
     with pytest.raises(ManagerError, match="Being serviced"):
         await server.manager.request_assignment("W1AW", "k4a")
+
+
+async def test_service_now_takes_the_radio_and_the_preview_says_so(server, members):
+    await server.manager.request_assignment("W1AW", "k4a")
+    body = BookingInput(radio="k4a", start="now", duration="1h", tz=NY, kind="maintenance")
+    preview = server.manager.bookings.create(members["ADMIN"], body, dry_run=True)
+    assert preview["interrupts"]["callsign"] == "W1AW" and preview["interrupts"]["now"] is True
+    assert "Ends W1AW's session on k4a now" in preview["summary"]
+
+    server.manager.bookings.create(members["ADMIN"], body)
+    await server.manager.enforce_bookings()
+    assert server.db.live_assignment_for_callsign("W1AW").expires_at <= utcnow()
+
+
+async def test_later_service_block_says_when_the_session_ends(server, members):
+    await server.manager.request_assignment("W1AW", "k4a")
+    result = book(server, members, "ADMIN", at(30), duration="1h", kind="maintenance", dry_run=True)
+    assert result["interrupts"]["now"] is False and "Ends W1AW's session on k4a at" in result["summary"]
+    assert book(server, members, "ADMIN", at(600), kind="maintenance", dry_run=True)["interrupts"] is None
+
+
+async def test_own_booking_does_not_interrupt(server, members):
+    await server.manager.request_assignment("W1AW", "k4a")
+    assert book(server, members, "W1AW", at(30), dry_run=True)["interrupts"] is None
 
 
 async def test_new_booking_caps_a_running_session(server, members):

@@ -32,6 +32,7 @@ from ..models import (
     Radio,
     User,
     isoformat,
+    parse_dt,
     utcnow,
 )
 from ..schedule import (
@@ -66,7 +67,7 @@ class BookingError(Exception):
 @dataclass
 class BookingInput:
     radio: str
-    start: str                     # local wall-clock time, "2026-10-20 19:00"
+    start: str                     # local wall-clock "2026-10-20 19:00", or "now", "noon", "tomorrow 9am"...
     duration: str | int
     tz: str
     mode: str = "reserve"
@@ -274,6 +275,7 @@ class BookingService:
             mode = BookingMode.RESERVE
 
         now = utcnow()
+        tz = self._schedule_error(lambda: zone(req.tz).key)
         booking = self._schedule_error(
             lambda: Booking(
                 id=0,
@@ -281,8 +283,8 @@ class BookingService:
                 owner=actor.callsign,
                 kind=kind,
                 mode=mode,
-                tz=zone(req.tz).key,
-                start=parse_local_start(req.start),
+                tz=tz,
+                start=parse_local_start(req.start, tz, now),
                 duration_minutes=parse_duration(req.duration),
                 rrule=None,
                 created_at=now,
@@ -403,6 +405,11 @@ class BookingService:
             summary += f". Removes {len(affected)} date(s) from other bookings: " + ", ".join(
                 f"{fmt_local(o.start, tz)} ({o.owner})" for o in affected
             )
+        interrupts = self._interrupts(booking, kept)
+        if interrupts:
+            summary += f". Ends {interrupts['callsign']}'s session on {booking.radio_id} " + (
+                "now" if interrupts["now"] else f"at {fmt_local(parse_dt(interrupts['at']), tz)}"
+            )
         return {
             "booking": None,
             "dry_run": dry_run,
@@ -413,6 +420,32 @@ class BookingService:
             "skipped": [d for d in dates if d["skipped"]],
             "affected": [self.occurrence_payload(o) for o in affected],
             "summary": summary + ".",
+            "interrupts": interrupts,
+        }
+
+    def _interrupts(self, booking: Booking, kept: list[Occurrence]) -> dict[str, Any] | None:
+        """The live session this booking will cut short, if any.
+
+        `manager.session_deadline` caps a session at the start of the next
+        maintenance block or someone else's booking, so a block starting 'now'
+        takes the radio from whoever is on it within one monitor tick, with no
+        expiry warning. The preview says so before the admin confirms.
+        """
+        live = self.db.live_assignment_for_radio(booking.radio_id)
+        if live is None:
+            return None
+        if booking.kind is not BookingKind.MAINTENANCE and live.callsign == booking.owner:
+            return None  # a member's own booking lengthens their session instead
+        now = utcnow()
+        first = next((c for c in kept if c.start < live.expires_at and c.end > now), None)
+        if first is None:
+            return None
+        at = max(first.start, now)
+        return {
+            "callsign": live.callsign,
+            "radio": booking.radio_id,
+            "at": isoformat(at),
+            "now": first.start <= now + timedelta(minutes=1),
         }
 
     def _displace(self, affected: list[Occurrence], actor: User, kind: BookingKind) -> None:
@@ -475,8 +508,9 @@ class BookingService:
         if current is None:
             raise BookingError(404, f"booking #{booking.id} has no date {occ_date}")
         tz = zone(booking.tz)
+        now = utcnow()
         new_start = (
-            self._schedule_error(lambda: parse_local_start(changes.start))
+            self._schedule_error(lambda: parse_local_start(changes.start, tz, now))
             if changes.start
             else current.start.astimezone(tz).replace(tzinfo=None)
         )
@@ -489,7 +523,6 @@ class BookingService:
                                  new_duration_minutes=minutes)
         others = [e for e in exceptions if e.occ_date != occ_date] + [moved]
         candidate = next(o for o in occurrences(booking, others) if o.occ_date == occ_date)
-        now = utcnow()
         if candidate.start < now - timedelta(minutes=1) and candidate.start != current.start:
             raise BookingError(400, f"{fmt_local(candidate.start, booking.tz)} is in the past")
         self._schedule_error(lambda: check_horizon([candidate], now))
@@ -521,7 +554,7 @@ class BookingService:
                 raise BookingError(400, "a maintenance block has no mode")
             updated.mode = self._enum(BookingMode, changes.mode, "mode")
         if changes.start:
-            updated.start = self._schedule_error(lambda: parse_local_start(changes.start))
+            updated.start = self._schedule_error(lambda: parse_local_start(changes.start, booking.tz))
         if changes.duration is not None:
             updated.duration_minutes = self._schedule_error(lambda: parse_duration(changes.duration))
         if changes.repeat is not None:

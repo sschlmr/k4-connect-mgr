@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 
 from test_e2e import live, run_cli  # noqa: F401  (live is a fixture)
 
-from k4cm.client.config import load_config
+from k4cm.client.config import ClientConfig, load_config, save_config
 from k4cm.schedule import zone
 
 
@@ -63,6 +63,31 @@ async def test_service_block_is_admin_only(live):  # noqa: F811
         "--yes",
     )
     assert result.exit_code == 1 and "administrator" in result.output
+
+
+def as_admin(live, tmp_path, monkeypatch) -> None:  # noqa: F811
+    admin_dir = tmp_path / "admin"
+    admin_dir.mkdir()
+    save_config(
+        ClientConfig(server_url=live.base_url, callsign="ADMIN", api_key=live.fixture.keys["ADMIN"]),
+        admin_dir / "config.toml",
+    )
+    monkeypatch.setenv("K4CM_CLIENT_DIR", str(admin_dir))
+
+
+async def test_service_now_shows_gmt_and_warns_the_operator(live, tmp_path, monkeypatch):  # noqa: F811
+    requested = await run_cli("request", "k4a", "--no-watch", "--no-connect")
+    assert requested.exit_code == 0, requested.output
+    as_admin(live, tmp_path, monkeypatch)
+    result = await run_cli("admin", "service", "k4a", "--start", "now", "--duration", "2h", "--yes")
+    assert result.exit_code == 0, result.output
+    assert "GMT" in result.output and "W1AW is on k4a: their session will end NOW" in result.output
+
+
+async def test_service_at_a_passed_time_is_refused(live, tmp_path, monkeypatch):  # noqa: F811
+    as_admin(live, tmp_path, monkeypatch)
+    result = await run_cli("admin", "service", "k4a", "--start", "today 00:00", "--duration", "1h", "--yes")
+    assert result.exit_code == 1 and "already passed" in result.output
 
 
 async def test_request_with_a_duration(live):  # noqa: F811

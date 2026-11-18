@@ -195,6 +195,9 @@ k4cm admin sessions --force-release 42    end someone's session
 k4cm admin audit --hours 24               read the audit trail
 k4cm admin service k4a --start "2026-10-20 09:00" --duration 4h
                                           mark a radio "Being serviced"
+k4cm admin service k4a --start now --duration 2h
+                                          ...starting now (also: noon, 2pm,
+                                          tomorrow 9am, tue 19:00)
 k4cm schedule add ... --override          book over members' bookings
 ```
 
