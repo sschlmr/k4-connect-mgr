@@ -8,7 +8,7 @@
 ; %APPDATA%\k4cm and is untouched by install, upgrade and uninstall.
 
 #define AppName "K4 Connect Manager Client"
-#define AppVersion "0.2.2"
+#define AppVersion "0.2.3"
 #define ClientExe "k4cm.exe"
 
 [Setup]
