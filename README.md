@@ -144,6 +144,8 @@ echo '[ -f ~/.bash_completions/k4cm.sh ] && . ~/.bash_completions/k4cm.sh' >> ~/
 ```
 
 zsh (the macOS default since Catalina), Linux and Windows PowerShell need nothing extra.
+If zsh completion only works from the second Tab in each terminal, it was installed by
+k4cm 0.2.3 or older: run `k4cm --install-completion` again after upgrading.
 
 On any machine with Python 3.11+ you can skip the installers entirely:
 

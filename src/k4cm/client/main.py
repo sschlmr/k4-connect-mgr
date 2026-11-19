@@ -23,6 +23,7 @@ from ..schedule import ScheduleError, parse_duration
 from . import radio as local_radio
 from . import schedule_cli
 from .api import ApiError, ServerApi
+from .completion import patch_typer_zsh
 from .config import (
     ClientConfig,
     ConfigError,
@@ -33,6 +34,8 @@ from .config import (
     save_config,
     save_pinned_certificate,
 )
+
+patch_typer_zsh()  # Typer's zsh script misses the first Tab of every shell
 
 app = typer.Typer(help="K4 Connect Manager — request and manage remote K4 sessions", no_args_is_help=True)
 admin_app = typer.Typer(help="Administrative commands (require an admin API key)", no_args_is_help=True)
