@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from k4cm import cat
@@ -22,6 +24,16 @@ from k4cm.server import tls
 def attached_to(fake):
     """Stands in for the server's link check: does the central fake see a client?"""
     return lambda: fake.client_count >= 1
+
+
+async def dropped(fake, seconds: float = 1.0) -> bool:
+    """Wait up to `seconds` for the central fake to lose its client. RRN; closes
+    the link from the panel's side, and the far end sees the close a moment
+    later — on a slow CI runner, after the assertion would already have run."""
+    deadline = asyncio.get_running_loop().time() + seconds
+    while fake.client_count and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.01)
+    return fake.client_count == 0
 
 
 # -- configuration ---------------------------------------------------------
@@ -130,8 +142,6 @@ async def test_connect_drives_the_local_panel(server):
         radio_cat_port=server.local_radio.cat_port,
     )
 
-    import asyncio
-
     message = await asyncio.to_thread(
         local_radio.connect, config, "127.0.0.1", server.radio_a.remote_port, "session-password", attached_to(server.radio_a)
     )
@@ -151,8 +161,6 @@ async def test_connect_reports_a_refused_password(server):
         radio_host="127.0.0.1",
         radio_cat_port=server.local_radio.cat_port,
     )
-
-    import asyncio
 
     with pytest.raises(local_radio.RadioError, match="RRT!"):
         await asyncio.to_thread(
@@ -174,8 +182,6 @@ async def test_connect_fails_when_a_refusal_is_silent(server, monkeypatch):
         radio_host="127.0.0.1",
         radio_cat_port=server.local_radio.cat_port,
     )
-
-    import asyncio
 
     with pytest.raises(local_radio.RadioError, match="did not connect"):
         await asyncio.to_thread(
@@ -199,8 +205,6 @@ async def test_connect_does_not_trust_the_panels_own_cc(server, monkeypatch):
         radio_cat_port=server.local_radio.cat_port,
     )
 
-    import asyncio
-
     with pytest.raises(local_radio.RadioError, match="did not connect"):
         await asyncio.to_thread(
             local_radio.connect, config, "127.0.0.1", server.radio_a.remote_port, "wrong-password",
@@ -220,8 +224,6 @@ async def test_disconnect_sends_rrn(server):
         radio_cat_port=server.local_radio.cat_port,
     )
 
-    import asyncio
-
     await asyncio.to_thread(
         local_radio.connect, config, "127.0.0.1", server.radio_a.remote_port, "pw", attached_to(server.radio_a)
     )
@@ -229,7 +231,7 @@ async def test_disconnect_sends_rrn(server):
 
     await asyncio.to_thread(local_radio.disconnect, config)
 
-    assert server.radio_a.client_count == 0
+    assert await dropped(server.radio_a)
     assert "RRN" in server.local_radio.commands
 
 
@@ -250,8 +252,6 @@ _NO_SESSION = {"assignment": None, "offer": None, "queued": None}
 async def test_watcher_disconnects_the_panel_when_the_session_ends(server, monkeypatch):
     # A real K4 keeps an attached client after RRC0;, so the client must drop
     # the link itself when the session it is watching ends.
-    import asyncio
-
     from k4cm.client import main as client_main
 
     server.radio_a.password = "pw"
@@ -269,12 +269,10 @@ async def test_watcher_disconnects_the_panel_when_the_session_ends(server, monke
     await asyncio.to_thread(client_main._watch_loop, _ScriptedApi(_LIVE_SESSION, _NO_SESSION), config)
 
     assert "RRN" in server.local_radio.commands
-    assert server.radio_a.client_count == 0
+    assert await dropped(server.radio_a)
 
 
 async def test_watcher_leaves_the_panel_alone_when_it_saw_no_session(server, monkeypatch):
-    import asyncio
-
     from k4cm.client import main as client_main
 
     server.radio_a.password = "pw"
@@ -314,8 +312,6 @@ class _BookedSessionApi:
 
 
 async def test_waiting_watcher_connects_a_session_the_booking_opened(server, monkeypatch):
-    import asyncio
-
     from k4cm.client import main as client_main
 
     server.radio_a.password = "pw"
@@ -352,8 +348,6 @@ async def test_unreachable_local_radio_is_reported(server):
         radio_host=dead.host,
         radio_cat_port=dead.cat_port,
     )
-
-    import asyncio
 
     with pytest.raises(local_radio.RadioError, match="cannot talk to your local radio"):
         await asyncio.to_thread(local_radio.disconnect, config)
