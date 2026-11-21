@@ -94,7 +94,8 @@ CREATE TABLE IF NOT EXISTS bookings (
     duration_minutes   INTEGER NOT NULL,
     rrule              TEXT,
     created_at         TEXT NOT NULL,
-    ending_notice_sent INTEGER NOT NULL DEFAULT 0
+    ending_notice_sent INTEGER NOT NULL DEFAULT 0,
+    reason             TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_bookings_radio ON bookings(radio_id);
 
@@ -130,6 +131,7 @@ CREATE INDEX IF NOT EXISTS idx_notices_callsign ON notices(callsign, read_at);
 # databases get them via ALTER TABLE on open; new ones already have them.
 ADDED_COLUMNS = [
     ("assignments", "client_addr", "TEXT"),
+    ("bookings", "reason", "TEXT NOT NULL DEFAULT ''"),
 ]
 
 
@@ -190,6 +192,7 @@ def _to_booking(row: sqlite3.Row) -> Booking:
         rrule=row["rrule"],
         created_at=parse_dt(row["created_at"]),
         ending_notice_sent=bool(row["ending_notice_sent"]),
+        reason=row["reason"],
     )
 
 
@@ -562,7 +565,7 @@ class Database:
             try:
                 cur = self._conn.execute(
                     "INSERT INTO bookings (radio_id, owner, kind, mode, tz, start, duration_minutes,"
-                    " rrule, created_at, ending_notice_sent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " rrule, created_at, ending_notice_sent, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         booking.radio_id,
                         booking.owner,
@@ -574,6 +577,7 @@ class Database:
                         booking.rrule,
                         isoformat(booking.created_at),
                         int(booking.ending_notice_sent),
+                        booking.reason,
                     ),
                 )
                 booking_id = int(cur.lastrowid)
@@ -591,7 +595,7 @@ class Database:
         with self._lock:
             cur = self._conn.execute(
                 "UPDATE bookings SET radio_id = ?, mode = ?, tz = ?, start = ?, duration_minutes = ?,"
-                " rrule = ?, ending_notice_sent = ? WHERE id = ?",
+                " rrule = ?, ending_notice_sent = ?, reason = ? WHERE id = ?",
                 (
                     booking.radio_id,
                     booking.mode.value,
@@ -600,6 +604,7 @@ class Database:
                     booking.duration_minutes,
                     booking.rrule,
                     int(booking.ending_notice_sent),
+                    booking.reason,
                     booking.id,
                 ),
             )

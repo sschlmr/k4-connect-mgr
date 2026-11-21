@@ -84,6 +84,19 @@ async def test_service_now_shows_gmt_and_warns_the_operator(live, tmp_path, monk
     assert "GMT" in result.output and "W1AW is on k4a: their session will end NOW" in result.output
 
 
+async def test_service_all_radios_with_a_reason(live, tmp_path, monkeypatch):  # noqa: F811
+    as_admin(live, tmp_path, monkeypatch)
+    start = tomorrow_at(9).strftime("%Y-%m-%d %H:%M")
+    result = await run_cli(
+        "admin", "service", "all", "--start", start, "--duration", "2h", "--reason", "Lightning", "--yes"
+    )
+    assert result.exit_code == 0, result.output
+    assert "Being serviced (Lightning)" in result.output and result.output.count("Booking") == 1
+    shown = await run_cli("schedule", "list")
+    radios = len(live.fixture.config.radios)
+    assert radios > 1 and shown.output.count("Being serviced (Lightning)") == radios, shown.output
+
+
 async def test_service_at_a_passed_time_is_refused(live, tmp_path, monkeypatch):  # noqa: F811
     as_admin(live, tmp_path, monkeypatch)
     result = await run_cli("admin", "service", "k4a", "--start", "today 00:00", "--duration", "1h", "--yes")

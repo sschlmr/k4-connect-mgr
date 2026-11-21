@@ -366,6 +366,7 @@ def occurrences(
                 mode=booking.mode,
                 start=begin,
                 end=begin + timedelta(minutes=minutes),
+                reason=booking.reason,
             )
         )
     result.sort(key=lambda o: o.start)

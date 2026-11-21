@@ -122,6 +122,9 @@ dialog::backdrop { background: rgba(15, 23, 42, .35); }
   <div class="row hidden" id="adminRow"><span class="lbl">Admin</span>
     <label><input type="checkbox" id="fMaint"> Being serviced</label>
     <label><input type="checkbox" id="fOverride"> Book over members</label></div>
+  <div class="row hidden" id="reasonRow"><label for="fReason">Reason</label>
+    <input type="text" id="fReason" maxlength="60" list="reasonList" placeholder="Maintenance, Lightning…">
+    <datalist id="reasonList"><option value="Maintenance"><option value="Lightning"><option value="Antenna work"><option value="Power outage"></datalist></div>
   <div id="repeatBox">
     <div class="row"><label for="fRep">Repeat</label>
       <select id="fRep"><option value="none">Does not repeat</option><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="mdate">Monthly, on dates</option><option value="mpos">Monthly, on a weekday</option><option value="yearly">Yearly</option></select>
@@ -394,7 +397,7 @@ function askScope(title, note) {
 // -- booking details --------------------------------------------------------
 async function openInfo(o) {
   const s = new Date(o.start), e = new Date(o.end);
-  $("infoTitle").textContent = o.kind === "maintenance" ? `${radioName(o.radio.id)}: Being serviced` : `${o.label} · ${radioName(o.radio.id)}`;
+  $("infoTitle").textContent = o.kind === "maintenance" ? `${radioName(o.radio.id)}: ${o.label}` : `${o.label} · ${radioName(o.radio.id)}`;
   const kv = $("infoKv"); kv.textContent = "";
   const add = (k, v) => { kv.append(el("div", null, k), el("div", null, v)); };
   add("When", fmtSpan(s, e));
@@ -511,8 +514,10 @@ function openBooking(opts) {
   form.edit = opts.edit || null; form.booking = opts.booking || null; form.repeatDirty = false;
   const radioSel = $("fRadio"); radioSel.textContent = "";
   for (const r of state.radios) { const op = el("option", null, r.name); op.value = r.id; op.disabled = !r.enabled; radioSel.append(op); }
+  if (state.me.is_admin && !opts.edit) { const all = el("option", null, "All radios"); all.value = ALL_RADIOS; radioSel.append(all); }
   $("adminRow").classList.toggle("hidden", !state.me.is_admin || !!form.edit);
   $("fMaint").checked = false; $("fOverride").checked = false;
+  $("fReason").value = opts.booking && opts.booking.reason || "";
   const editing = !!form.edit, series = editing && !!form.booking.rrule;
   $("scopeRow").classList.toggle("hidden", !series);
   $("bookTitle").textContent = editing ? `Edit booking #${form.edit.booking_id}` : "New booking";
@@ -530,12 +535,26 @@ function openBooking(opts) {
   $("fDate").value = ymd(start); $("fTime").value = hm(start);
   $("fH").value = Math.floor(minutes / 60); $("fM").value = Math.round(minutes % 60);
   document.querySelector(`input[name=mode][value=${mode}]`).checked = true;
-  $("modeRow").classList.toggle("hidden", editing && form.booking.kind === "maintenance");
+  syncMaintUi();
   fillRepeat(rule);
   syncScopeUi();
   $("preview").textContent = "Fill in the details to see the dates.";
   $("bookDlg").showModal();
   preview();
+}
+// A Being serviced block has a reason and no mode, and only it may cover
+// every radio at once.
+const ALL_RADIOS = "*all";
+function syncMaintUi() {
+  const maint = form.edit ? form.booking.kind === "maintenance" : $("fMaint").checked;
+  $("reasonRow").classList.toggle("hidden", !maint);
+  $("modeRow").classList.toggle("hidden", maint);
+  $("fOverride").disabled = maint;
+  const all = $("fRadio").querySelector(`option[value="${ALL_RADIOS}"]`);
+  if (all) {
+    all.hidden = all.disabled = !maint;
+    if (!maint && $("fRadio").value === ALL_RADIOS) $("fRadio").value = state.radio;
+  }
 }
 function syncScopeUi() {
   const scope = form.edit && form.booking.rrule ? $("fScope").value : "all";
@@ -555,8 +574,10 @@ function formBody() {
     mode: document.querySelector("input[name=mode]:checked").value };
   if (!form.edit) {
     body.repeat = repeatSpec();
-    if (state.me.is_admin && $("fMaint").checked) body.kind = "maintenance";
-    if (state.me.is_admin && $("fOverride").checked) body.override = true;
+    if (state.me.is_admin && $("fMaint").checked) {
+      body.kind = "maintenance"; body.reason = $("fReason").value.trim();
+      if (body.radio === ALL_RADIOS) { body.radio = ""; body.all_radios = true; }
+    } else if (state.me.is_admin && $("fOverride").checked) body.override = true;
     return body;
   }
   const scope = form.booking.rrule ? $("fScope").value : "all";
@@ -564,6 +585,7 @@ function formBody() {
   if (scope !== "this") {
     if (body.radio !== form.booking.radio.id) edit.radio = body.radio;
     if (form.booking.kind === "booking" && body.mode !== form.booking.mode) edit.mode = body.mode;
+    if (form.booking.kind === "maintenance" && $("fReason").value.trim() !== (form.booking.reason || "")) edit.reason = $("fReason").value.trim();
     const spec = repeatSpec();
     if (!spec && form.booking.rrule) throw new Error("A series can't be turned into a single booking; delete the later dates instead.");
     // Only a changed pattern is sent: resending the stored count would give
@@ -583,13 +605,14 @@ async function runPreview() {
     if (seq !== previewSeq) return;
     box.textContent = "";
     const live = r.dates.filter((d) => !d.skipped);
-    const sum = el("div", "sum", r.total > 1 ? `${r.booked} of ${r.total} dates` + (r.last ? `, last on ${fmtFull(new Date(r.last))}` : "") : (r.booked ? "This time is free." : ""));
+    const sum = el("div", "sum", r.all_radios ? r.summary : r.total > 1 ? `${r.booked} of ${r.total} dates` + (r.last ? `, last on ${fmtFull(new Date(r.last))}` : "") : (r.booked ? "This time is free." : ""));
     box.append(sum);
     for (const d of r.dates.slice(0, 12)) {
-      const line = el("div", d.skipped ? "skip" : null, fmtSpan(new Date(d.start), new Date(d.end)) + (d.skipped ? ` — skipped, held by ${d.blocked_by}` : ""));
+      const line = el("div", d.skipped ? "skip" : null, (d.radio ? `${d.radio}: ` : "") + fmtSpan(new Date(d.start), new Date(d.end)) + (d.skipped ? ` — skipped, held by ${d.blocked_by}` : ""));
       box.append(line);
     }
     if (r.dates.length > 12) box.append(el("div", "who", `…and ${r.dates.length - 12} more`));
+    for (const x of r.refused || []) box.append(el("div", "skip", `${x.radio.name}: left out, ${x.detail}`));
     for (const a of r.affected || []) box.append(el("div", "skip", `Removes ${a.owner}'s booking ${fmtSpan(new Date(a.start), new Date(a.end))}`));
     $("bookOk").disabled = live.length === 0;
   } catch (e) {
@@ -598,7 +621,7 @@ async function runPreview() {
   }
 }
 $("bookForm").addEventListener("input", preview);
-$("bookForm").addEventListener("change", (ev) => { if (ev.target.id === "fRep") { defaultOn(); syncRepeatUi(); } if (ev.target.id === "fScope") syncScopeUi(); preview(); });
+$("bookForm").addEventListener("change", (ev) => { if (ev.target.id === "fMaint") syncMaintUi(); if (ev.target.id === "fRep") { defaultOn(); syncRepeatUi(); } if (ev.target.id === "fScope") syncScopeUi(); preview(); });
 $("addPos").onclick = () => { addPosRow(); preview(); };
 for (const type of ["input", "change", "click"]) $("repeatBox").addEventListener(type, () => (form.repeatDirty = true));
 $("bookCancel").onclick = () => $("bookDlg").close();

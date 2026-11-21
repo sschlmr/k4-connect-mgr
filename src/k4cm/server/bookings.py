@@ -7,6 +7,12 @@ is refused; a series is created with the clashing dates skipped (recorded as
 Admin overrides and maintenance blocks ("Being serviced") go the other way:
 the members' clashing dates are removed, and their owners get a notice.
 
+A maintenance block carries a free-text reason ("lightning", "antenna work")
+that members see wherever the block is named, so they know whether to expect
+the radio back soon. An admin can block every radio at once (a storm does not
+pick one rig): that is one ordinary block per radio, created together so the
+admin confirms one preview, and each can later be changed or removed alone.
+
 Occurrences are recomputed from the stored rules rather than stored, and cached
 until the next write: a club has few enough bookings that expanding them all is
 cheap, and there is then no second copy of the schedule to drift out of step.
@@ -52,6 +58,12 @@ from .db import Database
 
 SCOPES = ("this", "following", "all")
 SERVICE_LABEL = "Being serviced"
+REASON_MAX = 60
+
+
+def service_label(reason: str = "") -> str:
+    """'Being serviced', or 'Being serviced (lightning)'."""
+    return f"{SERVICE_LABEL} ({reason})" if reason else SERVICE_LABEL
 
 
 class BookingError(Exception):
@@ -74,6 +86,8 @@ class BookingInput:
     kind: str = "booking"
     repeat: RepeatSpec | None = None
     override: bool = False
+    reason: str = ""               # maintenance blocks only
+    all_radios: bool = False       # maintenance blocks only: one block per radio
 
 
 @dataclass
@@ -85,6 +99,7 @@ class BookingChanges:
     repeat: RepeatSpec | None = None
     count: int | None = None       # change only how a series ends
     until: str | None = None
+    reason: str | None = None      # maintenance blocks only; "" clears it
 
 
 def fmt_local(when: datetime, tz: str) -> str:
@@ -99,7 +114,14 @@ def fmt_day(when: datetime, tz: str) -> str:
 
 
 def _who(occ: Occurrence) -> str:
-    return SERVICE_LABEL if occ.kind is BookingKind.MAINTENANCE else occ.owner
+    return service_label(occ.reason) if occ.kind is BookingKind.MAINTENANCE else occ.owner
+
+
+def _clean_reason(reason: str | None) -> str:
+    text = " ".join((reason or "").split())
+    if len(text) > REASON_MAX:
+        raise BookingError(400, f"keep the reason to {REASON_MAX} characters or fewer")
+    return text
 
 
 def _with_end(rule: str, *, count: int | None = None, until: str | None = None) -> str:
@@ -200,7 +222,8 @@ class BookingService:
             "owner": occ.owner,
             "kind": occ.kind.value,
             "mode": occ.mode.value,
-            "label": SERVICE_LABEL if occ.kind is BookingKind.MAINTENANCE else occ.owner,
+            "label": _who(occ),
+            "reason": occ.reason,
             "start": isoformat(occ.start),
             "end": isoformat(occ.end),
             "series": bool(booking and booking.rrule),
@@ -243,6 +266,7 @@ class BookingService:
             "owner": booking.owner,
             "kind": booking.kind.value,
             "mode": booking.mode.value,
+            "reason": booking.reason,
             "tz": booking.tz,
             "start_local": booking.start.isoformat(timespec="minutes"),
             "duration_minutes": booking.duration_minutes,
@@ -263,11 +287,16 @@ class BookingService:
     # -- creating ----------------------------------------------------------
 
     def create(self, actor: User, req: BookingInput, dry_run: bool = False) -> dict[str, Any]:
+        if req.all_radios:
+            return self.create_all(actor, req, dry_run)
         radio = self._radio(req.radio)
         kind = self._enum(BookingKind, req.kind, "kind")
         mode = self._enum(BookingMode, req.mode, "mode")
         if kind is BookingKind.MAINTENANCE and not actor.is_admin:
             raise BookingError(403, "only an administrator can mark a radio as being serviced")
+        reason = _clean_reason(req.reason)
+        if reason and kind is not BookingKind.MAINTENANCE:
+            raise BookingError(400, "only a Being serviced block has a reason")
         if req.override and not actor.is_admin:
             raise BookingError(403, "only an administrator can book over other members' bookings")
         override = req.override or kind is BookingKind.MAINTENANCE
@@ -288,6 +317,7 @@ class BookingService:
                 duration_minutes=parse_duration(req.duration),
                 rrule=None,
                 created_at=now,
+                reason=reason,
             )
         )
         if req.repeat is not None:
@@ -306,7 +336,7 @@ class BookingService:
         exceptions = [
             BookingException(booking.id, c.occ_date, "skip", "conflict", blocked_by=_who(b)) for c, b in skips
         ]
-        self._displace(affected, actor, kind)
+        self._displace(affected, actor, kind, reason)
         booking = self.db.create_booking(booking, exceptions)
         self.invalidate()
         self.db.audit(
@@ -314,11 +344,84 @@ class BookingService:
             "booking.create",
             f"#{booking.id} {kind.value} {radio.id} {booking.start.isoformat(timespec='minutes')} {booking.tz}"
             f" {booking.duration_minutes}min {describe_rrule(booking.rrule)}"
+            + (f"; reason: {reason}" if reason else "")
             + (f"; {len(skips)} skipped" if skips else "")
             + (f"; displaced {len(affected)}" if affected else ""),
         )
         result["booking"] = self.booking_payload(booking)
         return result
+
+    def create_all(self, actor: User, req: BookingInput, dry_run: bool = False) -> dict[str, Any]:
+        """Put every radio on a Being serviced block over the same time.
+
+        Every radio is previewed before any is booked, so a bad start or
+        duration refuses the lot. A radio that already has a block then (a
+        one-off clash) is left out and named; if every radio is, it is refused.
+        """
+        if not actor.is_admin:
+            raise BookingError(403, "only an administrator can mark radios as being serviced")
+        if self._enum(BookingKind, req.kind, "kind") is not BookingKind.MAINTENANCE:
+            raise BookingError(400, "only a Being serviced block can cover every radio at once")
+        radios = list(self.config.radios.values())
+        if not radios:
+            raise BookingError(404, "no radios are configured")
+
+        planned: list[tuple[Radio, dict[str, Any]]] = []
+        refused: list[dict[str, Any]] = []
+        for radio in radios:
+            one = replace(req, radio=radio.id, all_radios=False)
+            try:
+                planned.append((radio, self.create(actor, one, dry_run=True)))
+            except BookingError as e:
+                if e.status_code != 409:
+                    raise
+                refused.append({"radio": self._radio_view(radio.id), "detail": e.message})
+        if not planned:
+            raise BookingError(
+                409, "no radio can be blocked then: " + "; ".join(r["detail"] for r in refused), refused=refused
+            )
+        if not dry_run:
+            planned = [
+                (radio, self.create(actor, replace(req, radio=radio.id, all_radios=False)))
+                for radio, _ in planned
+            ]
+
+        results = [dict(r, radio=self._radio_view(radio.id)) for radio, r in planned]
+        dates = [dict(d, radio=r["radio"]["name"]) for r in results for d in r["dates"]]
+        lasts = [r["last"] for r in results if r["last"]]
+        cuts = [r["interrupts"] for r in results if r["interrupts"]]
+        names = ", ".join(r["radio"]["name"] for r in results)
+        summary = f"{'Would mark' if dry_run else 'Marked'} {names} as {service_label(_clean_reason(req.reason))}"
+        first = results[0]
+        if first["total"] > 1:
+            summary += f", {first['booked']} date(s) each" if all(r["booked"] == first["booked"] for r in results) else ""
+        skipped = sum(len(r["skipped"]) for r in results)
+        if skipped:
+            summary += f". {skipped} date(s) skipped where a block already exists"
+        for r in refused:
+            summary += f". Left out {r['radio']['name']}: {r['detail']}"
+        affected = [a for r in results for a in r["affected"]]
+        if affected:
+            summary += f". Removes {len(affected)} member booking date(s)"
+        for cut in cuts:
+            summary += f". Ends {cut['callsign']}'s session on {cut['radio']}" + (" now" if cut["now"] else "")
+        return {
+            "booking": None,
+            "bookings": [r["booking"] for r in results] if not dry_run else [],
+            "all_radios": True,
+            "dry_run": dry_run,
+            "results": results,
+            "refused": refused,
+            "dates": dates,
+            "total": sum(r["total"] for r in results),
+            "booked": sum(r["booked"] for r in results),
+            "last": max(lasts) if lasts else None,
+            "skipped": [d for d in dates if d["skipped"]],
+            "affected": affected,
+            "summary": summary + ".",
+            "interrupts": cuts[0] if cuts else None,
+            "interrupts_all": cuts,
+        }
 
     def _resolve(
         self,
@@ -448,9 +551,12 @@ class BookingService:
             "now": first.start <= now + timedelta(minutes=1),
         }
 
-    def _displace(self, affected: list[Occurrence], actor: User, kind: BookingKind) -> None:
+    def _displace(self, affected: list[Occurrence], actor: User, kind: BookingKind, reason: str = "") -> None:
         """Remove other members' dates for an override, and tell them."""
-        why = "the radio is being serviced" if kind is BookingKind.MAINTENANCE else f"{actor.callsign} booked over it"
+        if kind is BookingKind.MAINTENANCE:
+            why = "the radio is being serviced" + (f" ({reason})" if reason else "")
+        else:
+            why = f"{actor.callsign} booked over it"
         for occ in affected:
             booking = self.db.get_booking(occ.booking_id)
             if booking is None:
@@ -496,10 +602,12 @@ class BookingService:
     def _edit_one(
         self, actor: User, booking: Booking, changes: BookingChanges, occ_date: str, dry_run: bool
     ) -> dict[str, Any]:
-        if changes.radio or changes.mode or changes.repeat or changes.count or changes.until:
+        if changes.radio or changes.mode or changes.repeat or changes.count or changes.until or (
+            changes.reason is not None and _clean_reason(changes.reason) != booking.reason
+        ):
             raise BookingError(
-                400, "a single date can only change its time and length; change the radio, mode or "
-                "repeat for this and later dates, or the whole series"
+                400, "a single date can only change its time and length; change the radio, mode, reason "
+                "or repeat for this and later dates, or the whole series"
             )
         exceptions = self.db.exceptions_for(booking.id)
         current = next(
@@ -534,7 +642,7 @@ class BookingService:
         result = self._outcome(one_off, [candidate], skips, affected, dry_run)
         if dry_run:
             return result
-        self._displace(affected, actor, booking.kind)
+        self._displace(affected, actor, booking.kind, booking.reason)
         if booking.rrule:
             self.db.put_exception(moved)
         else:
@@ -553,6 +661,10 @@ class BookingService:
             if booking.kind is BookingKind.MAINTENANCE:
                 raise BookingError(400, "a maintenance block has no mode")
             updated.mode = self._enum(BookingMode, changes.mode, "mode")
+        if changes.reason is not None:
+            if booking.kind is not BookingKind.MAINTENANCE:
+                raise BookingError(400, "only a Being serviced block has a reason")
+            updated.reason = _clean_reason(changes.reason)
         if changes.start:
             updated.start = self._schedule_error(lambda: parse_local_start(changes.start, booking.tz))
         if changes.duration is not None:
@@ -586,7 +698,7 @@ class BookingService:
         result = self._outcome(updated, candidates, skips, affected, dry_run)
         if dry_run:
             return result
-        self._displace(affected, actor, booking.kind)
+        self._displace(affected, actor, booking.kind, updated.reason)
         self.db.update_booking(updated)
         self.db.delete_exceptions(booking.id, reason="conflict")
         for cand, blocker in skips:
@@ -631,7 +743,7 @@ class BookingService:
         result = self._outcome(tail, candidates, skips, affected, dry_run)
         if dry_run:
             return result
-        self._displace(affected, actor, booking.kind)
+        self._displace(affected, actor, booking.kind, tail.reason)
         booking.rrule = head_rule
         booking.ending_notice_sent = True  # its successor carries on; no "series ending" notice
         self.db.update_booking(booking)

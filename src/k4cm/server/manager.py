@@ -47,7 +47,7 @@ from ..models import (
 from ..schedule import ScheduleError
 from . import power as power_control
 from .auth import AuthThrottle
-from .bookings import SERVICE_LABEL, BookingService, fmt_local
+from .bookings import BookingService, fmt_local, service_label
 from .config import ServerConfig
 from .db import ClaimConflict, Database
 from .relay import RelayManager, normalize_addr
@@ -172,7 +172,7 @@ class AssignmentManager:
         if occ is not None and occ.kind is BookingKind.MAINTENANCE:
             raise ManagerError(
                 409,
-                f"{radio.name}: {SERVICE_LABEL} until {self._fmt(occ.end, tz)}",
+                f"{radio.name}: {service_label(occ.reason)} until {self._fmt(occ.end, tz)}",
                 radio_id=radio.id,
                 can_queue=self.db.queue_position(radio.id, callsign) is None,
             )
@@ -322,7 +322,7 @@ class AssignmentManager:
 
     @staticmethod
     def _who(occ: Occurrence) -> str:
-        return SERVICE_LABEL.lower() if occ.kind is BookingKind.MAINTENANCE else occ.owner
+        return service_label(occ.reason).lower() if occ.kind is BookingKind.MAINTENANCE else occ.owner
 
     def _busy_error(self, radio: Radio, callsign: str, current: Assignment, tz: str | None = None) -> ManagerError:
         return ManagerError(

@@ -147,13 +147,25 @@ def _confirm(question: str, yes: bool) -> bool:
     return typer.confirm(question, default=False)
 
 
+def _print_all_preview(result: dict[str, Any], cfg: ClientConfig) -> None:
+    """An every-radio block: the same preview, once per radio."""
+    for one in result["results"]:
+        typer.secho(f"{one['radio']['name']}:", bold=True)
+        _print_preview(one, cfg)
+    for left in result.get("refused") or []:
+        _main().warn(f"{left['radio']['name']}: left out, {left['detail']}")
+
+
 def _book(api: ServerApi, cfg: ClientConfig, body: dict[str, Any], yes: bool) -> None:
     main = _main()
     try:
         preview = api.create_booking(body, dry_run=True)
     except ApiError as e:
         main.fail(e)
-    _print_preview(preview, cfg)
+    if preview.get("all_radios"):
+        _print_all_preview(preview, cfg)
+    else:
+        _print_preview(preview, cfg)
     if not _confirm("Book these?" if preview["total"] > 1 else "Book it?", yes):
         typer.echo("Nothing booked.")
         return
@@ -161,6 +173,10 @@ def _book(api: ServerApi, cfg: ClientConfig, body: dict[str, Any], yes: bool) ->
         result = api.create_booking(body)
     except ApiError as e:
         main.fail(e)
+    if result.get("all_radios"):
+        numbers = ", ".join(f"#{b['id']} ({b['radio']['name']})" for b in result["bookings"])
+        main.ok(f"{result['summary']} Bookings {numbers}.")
+        return
     first = next((d for d in result["dates"] if not d["skipped"]), None)
     when = f" Starts {fmt_when(first['start'], cfg)} ({fmt_gmt(first['start'], first['end'])})." if first else ""
     main.ok(f"{result['summary']}{when} Booking #{result['booking']['id']}.")
@@ -228,12 +244,16 @@ def list_bookings(
     if not rows:
         typer.echo(f"No bookings from {first} to {last}.")
         return
-    typer.echo(f"{'WHEN':<34} {'RADIO':<14} {'WHO':<16} {'MODE':<8} BOOKING")
+    def who_of(occ: dict[str, Any]) -> str:
+        return occ["label"] + (" (you)" if occ["owner"] == cfg.callsign and occ["kind"] == "booking" else "")
+
+    width = max(16, *(len(who_of(occ)) for occ in rows))
+    typer.echo(f"{'WHEN':<34} {'RADIO':<14} {'WHO':<{width}} {'MODE':<8} BOOKING")
     for occ in rows:
-        who = occ["label"] + (" (you)" if occ["owner"] == cfg.callsign and occ["kind"] == "booking" else "")
+        who = who_of(occ)
         mode = "-" if occ["kind"] == "maintenance" else occ["mode"]
         typer.echo(
-            f"{fmt_span(occ['start'], occ['end'], cfg):<34} {occ['radio']['name']:<14} {who:<16} {mode:<8} "
+            f"{fmt_span(occ['start'], occ['end'], cfg):<34} {occ['radio']['name']:<14} {who:<{width}} {mode:<8} "
             f"#{occ['booking_id']}" + (" (series)" if occ["series"] else "")
         )
 
@@ -248,7 +268,10 @@ def show(booking_id: int = typer.Argument(..., help="Booking number, as shown by
     except ApiError as e:
         main.fail(e)
     hours, mins = divmod(b["duration_minutes"], 60)
-    kind = "Being serviced" if b["kind"] == "maintenance" else f"{b['mode']} booking"
+    if b["kind"] == "maintenance":
+        kind = "Being serviced" + (f" ({b['reason']})" if b.get("reason") else "")
+    else:
+        kind = f"{b['mode']} booking"
     typer.echo(f"#{b['id']} {b['radio']['name']}: {kind} by {b['owner']}")
     typer.echo(f"  {b['repeat']}, {hours}h{mins:02d} each, times in {b['tz']}")
     for d in b["dates"]:
@@ -276,6 +299,7 @@ def edit(
     on: str = typer.Option(None, "--on", help=ON_HELP),
     count: int = typer.Option(None, "--count", help="New number of dates (keeps the pattern)"),
     until: str = typer.Option(None, "--until", help="New last day, ISO date (keeps the pattern)"),
+    reason: str = typer.Option(None, "--reason", help="Admin: new reason for a Being serviced block ('' clears it)"),
     yes: bool = typer.Option(False, "--yes", "-y"),
 ) -> None:
     """Change a booking: one date, this and later dates, or the whole series."""
@@ -283,7 +307,7 @@ def edit(
     api, cfg = main.get_api()
     _check_duration(duration)
     body: dict[str, Any] = {"scope": scope, "date": on_date, "start": start, "duration": duration,
-                            "mode": mode, "radio": radio}
+                            "mode": mode, "radio": radio, "reason": reason}
     if repeat:
         body["repeat"] = _repeat(repeat, every, on, count, until)
     else:
@@ -346,7 +370,7 @@ def remove(
 
 
 def service(
-    radio: str = typer.Argument(..., help="Which K4"),
+    radio: str = typer.Argument(..., help="Which K4, or 'all' for every radio"),
     start: str = typer.Option(..., "--start", help=f"Local start: {START_HELP}"),
     duration: str = typer.Option(..., "--duration", help="e.g. 4h"),
     repeat: str = typer.Option(None, "--repeat", help=REPEAT_HELP),
@@ -354,16 +378,20 @@ def service(
     on: str = typer.Option(None, "--on", help=ON_HELP),
     count: int = typer.Option(None, "--count"),
     until: str = typer.Option(None, "--until", help="ISO date"),
+    reason: str = typer.Option("", "--reason", "-r", help="Why, shown to members: maintenance, lightning..."),
     yes: bool = typer.Option(False, "--yes", "-y"),
 ) -> None:
-    """Mark a radio as Being serviced. Members' bookings in that time are removed and they are told."""
+    """Mark a radio (or 'all' radios) as Being serviced. Members' bookings in that time are removed and they are told."""
     api, cfg = _main().get_api()
     _check_duration(duration)
+    every_radio = radio.strip().lower() == "all"
     body = {
-        "radio": radio,
+        "radio": "" if every_radio else radio,
+        "all_radios": every_radio,
         "start": start,
         "duration": duration,
         "kind": "maintenance",
+        "reason": reason,
         "repeat": _repeat(repeat, every, on, count, until),
     }
     _book(api, cfg, body, yes)

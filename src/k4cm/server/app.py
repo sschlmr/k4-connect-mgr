@@ -54,7 +54,7 @@ class RepeatBody(BaseModel):
 
 
 class BookingBody(BaseModel):
-    radio: str
+    radio: str = Field("", description="radio id or name; leave empty with all_radios")
     start: str = Field(..., description="local wall-clock time, e.g. 2026-10-20 19:00")
     duration: str = Field(..., description="2h, 90m, 1h30m")
     tz: str = Field(..., description="IANA time zone the start is in")
@@ -62,6 +62,8 @@ class BookingBody(BaseModel):
     kind: str = "booking"
     repeat: RepeatBody | None = None
     override: bool = False
+    reason: str = Field("", description="maintenance only: why, e.g. lightning")
+    all_radios: bool = Field(False, description="maintenance only: block every radio")
 
 
 class BookingEditBody(BaseModel):
@@ -74,6 +76,7 @@ class BookingEditBody(BaseModel):
     repeat: RepeatBody | None = None
     count: int | None = None
     until: str | None = None
+    reason: str | None = None
 
 
 class NewUserRequest(BaseModel):
@@ -236,6 +239,8 @@ def create_app(
                 kind=body.kind,
                 repeat=body.repeat.spec() if body.repeat else None,
                 override=body.override,
+                reason=body.reason,
+                all_radios=body.all_radios,
             ),
             dry_run=dry_run,
         )
@@ -256,6 +261,7 @@ def create_app(
             repeat=body.repeat.spec() if body.repeat else None,
             count=body.count,
             until=body.until,
+            reason=body.reason,
         )
         return manager.bookings.edit(user, booking_id, changes, body.scope, body.date, dry_run)
 

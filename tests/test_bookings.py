@@ -258,6 +258,78 @@ async def test_maintenance_removes_member_dates_and_tells_them(server, members):
     assert server.db.take_notices("K2ABC")
 
 
+async def test_maintenance_reason_is_shown_to_members(server, members):
+    start = at(60 * 24)
+    book(server, members, "W1AW", start)
+    result = book(server, members, "ADMIN", start, kind="maintenance", reason="  Lightning ")
+    assert result["booking"]["reason"] == "Lightning"
+    assert "being serviced (Lightning)" in server.db.take_notices("W1AW")[0]["message"]
+    [occ] = server.manager.bookings.list_occurrences(start, start + timedelta(hours=2))
+    assert occ["label"] == "Being serviced (Lightning)" and occ["reason"] == "Lightning"
+
+
+async def test_reason_is_for_maintenance_only_and_short(server, members):
+    with pytest.raises(BookingError, match="only a Being serviced block"):
+        book(server, members, "W1AW", at(60), reason="contest")
+    with pytest.raises(BookingError, match="60 characters"):
+        book(server, members, "ADMIN", at(60), kind="maintenance", reason="x" * 61)
+
+
+async def test_maintenance_reason_can_be_changed(server, members):
+    booking_id = book(server, members, "ADMIN", at(60), kind="maintenance", reason="Maintenance")["booking"]["id"]
+    server.manager.bookings.edit(members["ADMIN"], booking_id, BookingChanges(reason="Antenna work"))
+    assert series(booking_id, server)["reason"] == "Antenna work"
+    member = book(server, members, "W1AW", at(600))["booking"]["id"]
+    with pytest.raises(BookingError, match="only a Being serviced block"):
+        server.manager.bookings.edit(members["ADMIN"], member, BookingChanges(reason="x"))
+
+
+async def test_maintenance_reason_refuses_requests_with_it(server, members):
+    book(server, members, "ADMIN", at(0), kind="maintenance", reason="Lightning")
+    with pytest.raises(ManagerError, match=r"Being serviced \(Lightning\)"):
+        await server.manager.request_assignment("W1AW", "k4a")
+
+
+async def test_service_every_radio_at_once(server, members):
+    start = at(60 * 24)
+    book(server, members, "W1AW", start, radio="k4b")
+    body = BookingInput(radio="", start=text(start), duration="3h", tz="UTC", kind="maintenance",
+                        reason="Lightning", all_radios=True)
+    preview = server.manager.bookings.create(members["ADMIN"], body, dry_run=True)
+    assert preview["dry_run"] and not server.manager.bookings.list_series()[1:]
+    assert {r["radio"]["id"] for r in preview["results"]} == set(server.config.radios)
+    assert len(preview["affected"]) == 1
+
+    result = server.manager.bookings.create(members["ADMIN"], body)
+    made = result["bookings"]
+    assert {b["radio"]["id"] for b in made} == set(server.config.radios)
+    assert all(b["kind"] == "maintenance" and b["reason"] == "Lightning" for b in made)
+    assert "Lightning" in server.db.take_notices("W1AW")[0]["message"]
+    assert result["summary"].startswith("Marked ")
+
+
+async def test_service_every_radio_leaves_out_one_already_blocked(server, members):
+    start = at(60 * 24)
+    book(server, members, "ADMIN", start, radio="k4a", kind="maintenance")
+    body = BookingInput(radio="", start=text(start), duration="1h", tz="UTC", kind="maintenance", all_radios=True)
+    result = server.manager.bookings.create(members["ADMIN"], body)
+    assert sorted(b["radio"]["id"] for b in result["bookings"]) == sorted(set(server.config.radios) - {"k4a"})
+    assert [r["radio"]["id"] for r in result["refused"]] == ["k4a"]
+    with pytest.raises(BookingError) as excinfo:
+        server.manager.bookings.create(members["ADMIN"], body)
+    assert excinfo.value.status_code == 409
+
+
+async def test_every_radio_is_admin_and_maintenance_only(server, members):
+    body = BookingInput(radio="", start=text(at(60)), duration="1h", tz="UTC", kind="maintenance", all_radios=True)
+    with pytest.raises(BookingError) as excinfo:
+        server.manager.bookings.create(members["W1AW"], body)
+    assert excinfo.value.status_code == 403
+    body.kind = "booking"
+    with pytest.raises(BookingError, match="every radio"):
+        server.manager.bookings.create(members["ADMIN"], body)
+
+
 async def test_members_cannot_override(server, members):
     with pytest.raises(BookingError) as excinfo:
         book(server, members, "W1AW", at(60), override=True)

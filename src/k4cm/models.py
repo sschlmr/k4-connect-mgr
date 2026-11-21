@@ -260,6 +260,7 @@ class Booking:
     rrule: str | None
     created_at: datetime
     ending_notice_sent: bool = False
+    reason: str = ""               # why a maintenance block exists: "lightning", "antenna work"
 
 
 @dataclass
@@ -291,6 +292,7 @@ class Occurrence:
     mode: BookingMode
     start: datetime
     end: datetime
+    reason: str = ""
 
     def overlaps(self, start: datetime, end: datetime) -> bool:
         return self.start < end and start < self.end

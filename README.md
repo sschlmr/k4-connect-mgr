@@ -200,6 +200,11 @@ k4cm admin service k4a --start "2026-10-20 09:00" --duration 4h
 k4cm admin service k4a --start now --duration 2h
                                           ...starting now (also: noon, 2pm,
                                           tomorrow 9am, tue 19:00)
+k4cm admin service all --start now --duration 3h --reason Lightning
+                                          every radio at once, with a reason
+                                          members see ("Being serviced (Lightning)")
+k4cm schedule edit 12 --reason "Antenna work"
+                                          change a block's reason
 k4cm schedule add ... --override          book over members' bookings
 ```
 
@@ -243,7 +248,11 @@ across daylight-saving changes.
 - **Every other session ends at the next booking**, and an extension is
   refused if a booking, a "Being serviced" block or a queue is in its way.
 - **Admins** can mark a radio "Being serviced" or book with `--override`;
-  members' clashing dates are removed and they get a notice.
+  members' clashing dates are removed and they get a notice. A block can carry
+  a short reason (up to 60 characters), shown in `k4cm status`, the schedule,
+  the calendar and refusals. `all` in place of a radio blocks every radio over
+  the same time — one block per radio, each changeable on its own; a radio
+  already blocked then is left out and named in the preview.
 - Owners are reminded `ending_notice_days` before a series' last date.
 
 Set in `[schedule]` in `server.toml` (absent from older files; the defaults apply):
