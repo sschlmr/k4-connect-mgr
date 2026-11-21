@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-VERSION="${VERSION:-0.2.4}"
+VERSION="${VERSION:-0.2.5}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OUT="$ROOT/packaging/out"
 ARCH="$(uname -m)"
