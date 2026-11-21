@@ -1,7 +1,16 @@
 # Hardware test configuration. Copy to tests/hardware/hardware.toml (gitignored)
 # and fill in what you have; tests needing an absent section are skipped.
 #
-#   .venv/bin/python -m pytest tests/hardware -v -s
+#   K4CM_HARDWARE=1 .venv/bin/python -m pytest tests/hardware -v -s
+#
+# Without K4CM_HARDWARE=1 everything is skipped, even with this file present.
+#
+# Before the first test the run requests [claim] radio through your own k4cm
+# login (the client config 'k4cm config' wrote) and releases it after the
+# last. If the radio is in use, held or booked, or you already have a session,
+# every test is skipped: a hardware run never interrupts anyone.
+[claim]
+radio = "k4-1"             # the k4cm radio id, as 'k4cm status' shows it
 #
 # Results, including raw radio responses, are written to
 # tests/hardware/observations.json (also gitignored).
@@ -12,13 +21,12 @@
 cat_host = "192.168.1.50"
 cat_port = 9200
 
-# A remote K4 the panel can connect to, with a password that currently works.
-# Used for the connect / disconnect / wrong-password tests. Nothing here is
-# changed on that radio.
+# The claimed radio as the panel dials it (through the site's relay).
+# Used for the connect / disconnect / wrong-password tests. The password is
+# the claimed session's, so none is configured here.
 [remote]
 host = "mh01.net"          # exactly what RRT will be given; a name tests name support
 port = 9204
-password = "..."
 
 # The central K4's CAT port. Only reachable from the site LAN or over a VPN.
 # Without allow_changes the tests only read from it.

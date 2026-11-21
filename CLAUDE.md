@@ -19,6 +19,7 @@ current — read them before changing behaviour they describe.
 ```bash
 python -m venv .venv && .venv/bin/python -m pip install -e ".[dev]"
 .venv/bin/python -m pytest                       # full suite (~6s, no hardware needed)
+K4CM_HARDWARE=1 .venv/bin/python -m pytest tests/hardware -v -s   # real radios: release stage only
 .venv/bin/python -m pytest tests/test_manager.py -k queue_offer   # one test / pattern
 .venv/bin/python -m ruff check .                 # lint (E402 + bugbear config in pyproject)
 ```
@@ -182,7 +183,12 @@ a real `Database` in `tmp_path`, manager, monitor, and the app. `server.add_user
 request → connect → release flow is testable without hardware. Extend the fake rather than
 mocking `cat` when adding radio behaviour. The fake follows the K4 Programmer's Reference
 (rev. D12) where it is specific — e.g. `CC;` is -1 on a radio connected as a client — and
-`tests/hardware/` checks those assumptions against real radios (opt-in, skipped by default).
+`tests/hardware/` checks those assumptions against real radios. They are skipped unless
+`K4CM_HARDWARE=1` is set as well as `hardware.toml` existing, because they send `RRN;` to a
+real panel and dial the central radio, which drops a live session. Even when enabled, the
+session fixture `claim` must first get the radio through the tester's own k4cm login, or
+every test is skipped. Never run them unless asked; they belong to the final stage of
+release testing (README, "Testing against real radios").
 
 `test_e2e.py` goes further: uvicorn in a background thread and CLI invocations pushed to
 worker threads (`asyncio.to_thread`) so the test's event loop stays free to serve the fake

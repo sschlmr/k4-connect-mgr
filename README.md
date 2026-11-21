@@ -372,12 +372,22 @@ K4/0 does this silently, with no `RRT!`), whether `RRC0;` drops an attached
 panel (it doesn't, which is why the server relays), and that an ended session's
 password no longer connects. It is skipped unless you create
 `tests/hardware/hardware.toml` (copy `hardware.example.toml`; the file is
-gitignored). Tests that change the central radio's password need
-`allow_changes = true` and restore its original settings afterwards.
+gitignored) **and** set `K4CM_HARDWARE=1`. Tests that change the central
+radio's password need `allow_changes = true` and restore its original settings
+afterwards.
+
+These tests disconnect your panel and dial the central radio, so they would cut
+off anyone using it. Run them only as the last step before tagging a release,
+with no session of your own open:
 
 ```
-.venv/bin/python -m pytest tests/hardware -v -s
+K4CM_HARDWARE=1 .venv/bin/python -m pytest tests/hardware -v -s
 ```
+
+The run first requests the radio named in `[claim] radio` with your own `k4cm`
+login, uses that session's password, and releases it at the end. If the radio
+is in use, held or booked, or you already have a session, every test is skipped
+with the reason: the tests run only when nobody would be interrupted.
 
 Raw responses are saved to `tests/hardware/observations.json`.
 
